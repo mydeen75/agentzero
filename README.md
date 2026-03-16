@@ -1,3 +1,84 @@
+## Security Questionnaire Review — MVP1 Frontend
+
+### What this is
+
+A minimal React + TypeScript UI for the MVP1 **Security Questionnaire Review** flow:
+
+- Single page with a textarea for 1–5 security questions.
+- `Start run` button that calls **stubbed services** (no real backend yet).
+- Results list showing **question → mock draft answer → citation(s)**.
+- Crew status banner (`Crew: idle/running/done/error`) with colored pill and last-updated timestamp.
+- In-memory run history panel.
+
+Happy-path only: one seeded example input, one run, one set of mock results.
+
+---
+
+### How to run locally
+
+Prerequisites:
+
+- Node.js 18+ and npm installed.
+
+Steps:
+
+```bash
+cd ./Agent0         # repo root
+npm install
+npm run dev
+```
+
+Then open `http://localhost:5173/` in your browser.
+
+---
+
+### Happy-path demo flow
+
+1. Paste the seeded questions into the textarea (one per line), for example:
+
+   - `Does your organization enforce multi-factor authentication (MFA) for production access?`
+   - `How are security patches and updates applied to critical systems?`
+   - `Describe how access to customer data is logged and monitored.`
+
+2. Click **Start run**.
+   - Crew status banner shows **`Crew: running`** with a blue pill and updated timestamp.
+   - A short “Processing: Parsing → Finding evidence → Drafting → Attaching citations…” label appears.
+
+3. After ~1–2 seconds:
+   - Results section shows each question with a **mock draft answer** and one citation.
+   - Crew status banner updates to **`Crew: done`** with a green pill and a new “last updated” time.
+   - Run history panel shows a single **Completed** run with timestamp and question count.
+
+4. (Optional) Click **Export JSON** to download a JSON file containing the current `results` payload.
+
+For the Loom or screenshots, capture:
+
+- The initial state (`Crew: idle`, empty results).
+- The moment after clicking **Start run** (`Crew: running`, progress text visible).
+- The completed state (`Crew: done`, results + citations + run history visible).
+
+---
+
+### Where CrewAI integration will connect
+
+Current implementation is **frontend-only**:
+
+- `src/services.ts` contains stubbed functions:
+  - `startRun(questions)` — simulates latency and returns deterministic mock `ResultItem[]`.
+  - `getRunStatus(runId)` — returns an immediate `"completed"` status.
+
+Planned CrewAI integration points:
+
+- Replace `startRun` with a real call to the backend endpoint (e.g. `POST /api/process`) that:
+  - Accepts `{ questions: { id: string; text: string }[] }`.
+  - Returns the results JSON structure defined in `sad.mvp1.md` and `frontend-functional-spec.md`.
+- Optionally use `getRunStatus(runId)` to poll a status endpoint for longer-running crews.
+
+Contracts and types for these payloads are defined in:
+
+- `frontend-functional-spec.md` — **Inputs / Run / Results / History** sections.
+- `src/types.ts` — `QuestionInput`, `ResultItem`, `RunStatus`, and `RunSummary`.
+
 # AAMAD – AI-Assisted Multi-Agent Application Development Framework
 
 **AAMAD** is an open, production-grade framework for building, deploying, and evolving multi-agent applications using best context engineering practices.  
