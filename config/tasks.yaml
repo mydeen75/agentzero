@@ -1,0 +1,54 @@
+# MVP1 CrewAI tasks configuration (externalized, adapter-crewai compliant)
+#
+# Derived from project-context/2.build/sad.mvp1.md §2 "Task Orchestration (MVP1)".
+# Four sequential tasks: question_intake -> evidence_retrieval -> answer_drafting -> citation_attachment.
+
+question_intake:
+  id: question_intake
+  description: "Parse uploaded file or pasted text into a structured list of questions with optional domain/framework tag."
+  agent: ingestion_agent
+  expected_output:
+    # This is machine-consumed; avoid code fences around the JSON.
+    schema: "array of { id, text, domain? }"
+  context:
+    inputs:
+      - "request.questions"
+      - "request.file"
+  human_input: false
+
+evidence_retrieval:
+  id: evidence_retrieval
+  description: "For each question, retrieve top-k evidence chunks from the demo knowledge base (document id, section, text/snippet)."
+  agent: retrieval_agent
+  expected_output:
+    schema: "questions with attached evidence arrays"
+  context:
+    tasks:
+      - question_intake
+  human_input: false
+
+answer_drafting:
+  id: answer_drafting
+  description: "Generate draft answer for each question using only retrieved evidence; no unsupported claims."
+  agent: drafting_agent
+  expected_output:
+    schema: "array of { question_id, question_text, answer }"
+  context:
+    tasks:
+      - question_intake
+      - evidence_retrieval
+  human_input: false
+
+citation_attachment:
+  id: citation_attachment
+  description: "Attach claim-level citations (document, section, snippet) to each answer; flag or refuse when evidence missing."
+  agent: citation_agent
+  expected_output:
+    schema: "array of { question_id, question_text, answer, citations[] }"
+  context:
+    tasks:
+      - question_intake
+      - evidence_retrieval
+      - answer_drafting
+  human_input: false
+

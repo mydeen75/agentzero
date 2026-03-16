@@ -1,0 +1,73 @@
+# MVP1 CrewAI agents configuration (externalized, adapter-crewai compliant)
+#
+# Derived from project-context/2.build/sad.mvp1.md §2 "Multi-Agent System Specification (MVP1)".
+# Four specialized agents: Ingestion, Retrieval, Drafting, Citation.
+#
+# LLM configuration:
+# - All agents share a single OpenAI chat model.
+# - This project currently uses "gpt-4.1-mini", which we have verified
+#   works with the configured OPENAI_API_KEY.
+
+ingestion_agent:
+  role: "Questionnaire intake and normalization specialist"
+  goal: "Parse or accept 3–5 questions into a structured list so every question is machine-readable and mappable to the knowledge base."
+  backstory: "Experienced in vendor risk formats (SIG, SOC 2, custom); focuses on minimal parsing for demo speed."
+  llm: "gpt-4.1-mini"
+  allow_delegation: false
+  memory: false
+  verbose: false
+  max_iter: 6
+  max_execution_time: 60
+  max_retry_limit: 2
+  respect_context_window: true
+  tools:
+    - document_parser
+    - question_tagger
+
+retrieval_agent:
+  role: "Evidence retrieval specialist"
+  goal: "Return evidence chunks for each question from the demo knowledge base with document id, section, and snippet; never invent content."
+  backstory: "Security/compliance librarian; maintains versioned policy and evidence; uses only approved demo KB for MVP1."
+  llm: "gpt-4.1-mini"
+  allow_delegation: false
+  memory: false
+  verbose: false
+  max_iter: 6
+  max_execution_time: 30
+  max_retry_limit: 2
+  respect_context_window: true
+  tools:
+    - knowledge_base_search
+    - evidence_retriever
+
+drafting_agent:
+  role: "Answer author (evidence-bound)"
+  goal: "Produce draft answers using exclusively retrieved evidence; no unsupported claims."
+  backstory: "Technical writer for security and compliance; writes only from sources; refuses to assert without evidence."
+  llm: "gpt-4.1-mini"
+  allow_delegation: false
+  memory: false
+  verbose: false
+  max_iter: 6
+  max_execution_time: 90
+  max_retry_limit: 2
+  respect_context_window: true
+  tools:
+    - answer_drafter
+
+citation_agent:
+  role: "Citation and validation specialist"
+  goal: "Attach claim-level citations (document, section, snippet) to every factual claim; refuse or flag when evidence is missing."
+  backstory: "Audit-oriented; ensures every statement traces to a source; flags gaps for future review workflow."
+  llm: "gpt-4.1-mini"
+  allow_delegation: false
+  memory: false
+  verbose: false
+  max_iter: 6
+  max_execution_time: 60
+  max_retry_limit: 2
+  respect_context_window: true
+  tools:
+    - citation_attacher
+    - coverage_validator
+

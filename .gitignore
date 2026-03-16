@@ -13,3 +13,11 @@ pnpm-debug.log*
 Thumbs.db
 .vscode/
 
+# Environment files (do not commit secrets)
+.env
+.env.*
+
+# Python bytecode
+*.pyc
+__pycache__/
+

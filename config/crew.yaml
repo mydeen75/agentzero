@@ -1,0 +1,19 @@
+# High-level MVP1 crew configuration.
+#
+# This defines the sequential four-task pipeline described in
+# project-context/2.build/sad.mvp1.md and can be used by the backend
+# runtime to construct a CrewAI crew.
+
+id: mvp1_demo_crew
+description: "MVP1 demo crew: Ingestion -> Retrieval -> Drafting -> Citation."
+process_type: sequential
+memory: false
+verbose: false
+max_rpm: 60
+
+tasks:
+  - question_intake
+  - evidence_retrieval
+  - answer_drafting
+  - citation_attachment
+
