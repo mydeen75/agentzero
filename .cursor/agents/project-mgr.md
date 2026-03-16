@@ -14,7 +14,7 @@ actions:
   - document-setup       # Complete setup.md
 inputs:
   - project-context/1.define/prd.md
-  - project-context/2.build/sad.md
+  - project-context/2.build/sad.mvp1.md
 outputs:
   - project-context/2.build/setup.md
 prohibited-actions:

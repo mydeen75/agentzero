@@ -16,7 +16,7 @@ actions:
   - document-backend   # Maintain backend.md with implementation details
 inputs:
   - project-context/1.define/prd.md
-  - project-context/2.build/sad.md
+  - project-context/2.build/sad.mvp1.md
   - project-context/2.build/setup.md
 outputs:
   - project-context/2.build/backend.md

@@ -14,7 +14,7 @@ alwaysApply: true
 | QA           | @qa.eng        | qa.md                  | SAD: Testing, PRD: QA Plan     | *qa               |
 
 ## Execution Notes
-- Each persona works independently referencing PRD and SAD. **Default SAD**: `project-context/2.build/sad.md` (full MVP). For demo/MVP1 scope (60–90s demo, 15-day build), specify `project-context/2.build/sad.mvp1.md` explicitly (e.g. @sad.mvp1.md or "use sad.mvp1.md as the SAD").
+- Each persona works independently referencing PRD and SAD. **Default SAD**: `project-context/2.build/sad.mvp1.md` (MVP1 demo scope). For full MVP scope use `project-context/2.build/sad.md` explicitly (e.g. @sad.md or "use sad.md as the SAD").
 - Output artifact for each epic lives in docs/ as [epic].md.
 - Mark “future work” visibly in UI and docs as needed.
 - Update this index as epics progress or new ones are added.
