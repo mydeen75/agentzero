@@ -14,7 +14,7 @@ Happy-path only: one seeded example input, one run, one set of mock results.
 
 ---
 
-### How to run locally
+### How to run the frontend locally
 
 Prerequisites:
 
@@ -23,12 +23,12 @@ Prerequisites:
 Steps:
 
 ```bash
-cd ./Agent0         # repo root
+cd ./Agent0/frontend
 npm install
 npm run dev
 ```
 
-Then open `http://localhost:5173/` in your browser.
+Then open `http://localhost:5173/` in your browser. The backend and AAMAD framework remain at the repository root; the React app lives entirely under `frontend/`.
 
 ---
 
@@ -63,7 +63,7 @@ For the Loom or screenshots, capture:
 
 Current implementation is **frontend-only**:
 
-- `src/services.ts` contains stubbed functions:
+- `frontend/src/services.ts` contains stubbed functions:
   - `startRun(questions)` — simulates latency and returns deterministic mock `ResultItem[]`.
   - `getRunStatus(runId)` — returns an immediate `"completed"` status.
 
@@ -77,7 +77,7 @@ Planned CrewAI integration points:
 Contracts and types for these payloads are defined in:
 
 - `frontend-functional-spec.md` — **Inputs / Run / Results / History** sections.
-- `src/types.ts` — `QuestionInput`, `ResultItem`, `RunStatus`, and `RunSummary`.
+- `frontend/src/types.ts` — `QuestionInput`, `ResultItem`, `RunStatus`, and `RunSummary`.
 
 # AAMAD – AI-Assisted Multi-Agent Application Development Framework
 
