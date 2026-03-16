@@ -34,6 +34,7 @@ export const App: React.FC = () => {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   const questionCount = useMemo(() => countQuestions(rawInput), [rawInput]);
   const hasTooManyQuestions = questionCount > MAX_QUESTIONS;
@@ -49,6 +50,7 @@ export const App: React.FC = () => {
     if (questions.length === 0) return;
 
     setUiState((prev) => transition(prev, { type: "START" }));
+    setLastUpdated(new Date().toISOString());
     setError(null);
 
     const startedAt = new Date().toISOString();
@@ -68,6 +70,7 @@ export const App: React.FC = () => {
       setActiveRunId(runId);
       setResults(runResults ?? null);
       setUiState((prev) => transition(prev, { type: "RESOLVE" }));
+      setLastUpdated(new Date().toISOString());
     } catch (e) {
       const message =
         e instanceof Error ? e.message : "Unknown error starting run.";
@@ -84,6 +87,7 @@ export const App: React.FC = () => {
 
       setRuns((prev) => [failedSummary, ...prev]);
       setUiState((prev) => transition(prev, { type: "FAIL" }));
+      setLastUpdated(new Date().toISOString());
     }
   }
 
@@ -92,6 +96,7 @@ export const App: React.FC = () => {
     setResults(null);
     setActiveRunId(null);
     setError(null);
+    setLastUpdated(new Date().toISOString());
   }
 
   function handleExport() {
@@ -111,6 +116,24 @@ export const App: React.FC = () => {
   }
 
   const disableInput = uiState === "running";
+
+  const crewStatusLabel =
+    uiState === "running"
+      ? "Crew: running"
+      : uiState === "done"
+      ? error
+        ? "Crew: error"
+        : "Crew: done"
+      : "Crew: idle";
+
+  const crewStatusColor =
+    uiState === "running"
+      ? "#38bdf8" // blue
+      : uiState === "done"
+      ? error
+        ? "#f97373" // red
+        : "#22c55e" // green
+      : "#9ca3af"; // gray
 
   let progressLabel: string | null = null;
   if (uiState === "running") {
@@ -140,6 +163,38 @@ export const App: React.FC = () => {
         <p style={{ marginTop: "0.25rem", color: "#9ca3af" }}>
           First draft with evidence-grade citations in under 90 seconds.
         </p>
+
+        <div
+          style={{
+            marginTop: "0.75rem",
+            padding: "0.5rem 0.9rem",
+            borderRadius: "999px",
+            border: "1px solid rgba(148, 163, 184, 0.5)",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "0.6rem",
+            fontSize: "0.85rem",
+            backgroundColor: "rgba(15, 23, 42, 0.9)"
+          }}
+          aria-label="Crew status"
+        >
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: "999px",
+              backgroundColor: crewStatusColor,
+              boxShadow: `0 0 10px ${crewStatusColor}`
+            }}
+          />
+          <span>{crewStatusLabel}</span>
+          {lastUpdated && (
+            <span style={{ color: "#9ca3af", fontSize: "0.8rem" }}>
+              • Last updated:{" "}
+              {new Date(lastUpdated).toLocaleTimeString()}
+            </span>
+          )}
+        </div>
       </header>
 
       <main

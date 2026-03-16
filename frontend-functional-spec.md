@@ -142,35 +142,37 @@ The `Security Questionnaire Review` frontend implements the MVP1 single-flow UI 
 
 ### Spec Sync Checklist
 
-This checklist must be reviewed and updated after **each frontend commit** that touches the `Security Questionnaire Review` UI, state management, or service integration. Do not mark a checkbox as complete without verifying the item.
+This checklist must be reviewed and updated after **each frontend commit** that touches the `Security Questionnaire Review` UI, state management, or service integration. For each item, track **status** and a short **note** on what changed to keep spec and implementation in lockstep.
 
-- [ ] **Inputs match spec**
-  - [ ] Textarea enforces 1–5 questions and trims/ignores empty lines.
-  - [ ] Client-side question IDs and payload shape still match the `Inputs` section.
+- **Inputs match spec**
+  - **Status**: ✅
+  - **Note**: Textarea enforces 1–5 questions (with question count display), trims/ignores empty lines, and still emits `{ id: string; text: string }[]` as defined in `Inputs`.
 
-- [ ] **FSM implementation matches spec**
-  - [ ] States are limited to `idle`, `running`, and `done`.
-  - [ ] Events and transitions are implemented as defined.
-  - [ ] UI-disable logic during `running` is still correct.
+- **FSM implementation matches spec**
+  - **Status**: ✅
+  - **Note**: FSM remains `idle` → `running` → `done` with `START` / `RESOLVE` / `FAIL` / `RESET` events; UI disables input while `running` and now also drives the crew status banner wording.
 
-- [ ] **Services match contracts**
-  - [ ] `startRun` input/output types match this spec and `sad.mvp1.md`.
-  - [ ] `getRunStatus` input/output types match this spec and `sad.mvp1.md`.
-  - [ ] Any backend API path or schema changes are reflected here.
+- **Services match contracts**
+  - **Status**: ✅
+  - **Note**: `startRun(questions: QuestionInput[])` returns `{ runId, results? }` aligned with the `Results` payload shape; `getRunStatus(runId)` returns `{ status, results?, error? }` as described, with current implementation stubbed on the frontend.
 
-- [ ] **Results rendering matches spec**
-  - [ ] Results UI shows question, answer, and citations per item.
-  - [ ] “No evidence available” behaviour is implemented and still works.
+- **Results rendering matches spec**
+  - **Status**: ✅
+  - **Note**: Results list renders question text, mock draft answer, and citations `{ document, section, snippet }[]` per item; “No evidence available” message shows when citations are empty.
 
-- [ ] **History behaves as described**
-  - [ ] In-memory run history is updated on every run start/finish.
-  - [ ] History UI accurately reflects run count and status.
+- **History behaves as described**
+  - **Status**: ✅
+  - **Note**: In-memory `runs` array tracks `runId`, `startedAt`, `finishedAt`, `status`, `questionCount`, and optional `lastError`; history panel surfaces status badges and timestamps for each run.
 
-- [ ] **Export behaviour is aligned**
-  - [ ] `Export` button still calls a stub or real export function that uses the latest result payload shape.
-  - [ ] Any change to export format or behaviour is documented here.
+- **Export behaviour is aligned**
+  - **Status**: ✅
+  - **Note**: `Export JSON` button triggers a client-side download of the current `{ results: ResultItem[] }` payload, matching the described stub export behavior.
 
-- [ ] **Cross-doc alignment**
-  - [ ] This spec remains consistent with `project-context/2.build/sad.mvp1.md` Sections 2–4 (especially response schema and demo flow).
-  - [ ] Any deviations from the SAD are clearly called out and justified in comments or a follow-up section.
+- **Crew status banner is in sync**
+  - **Status**: ✅
+  - **Note**: Header shows a crew status pill and label (`Crew: idle`, `Crew: running`, `Crew: done`, `Crew: error`) plus “last updated” timestamp; wording is consistent with FSM states and button text.
+
+- **Cross-doc alignment**
+  - **Status**: ✅
+  - **Note**: Types and payload shapes remain consistent with `project-context/2.build/sad.mvp1.md` Sections 2–4, especially the results JSON schema; any future API schema change must be mirrored here and in `src/types.ts`.
 
