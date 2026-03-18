@@ -1,16 +1,16 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
 import { transition, type UiState } from "./fsm";
-import {
-  type AnswerReviewStatus,
-  type QuestionInput,
-  type ResultItem,
-  type RunSummary,
-  type RunStatus
-} from "./types";
+import type { AnswerReviewStatus, QuestionInput, ResultItem } from "./types";
 import { startRun } from "./services";
 
 const MAX_QUESTIONS = 5;
+
+const DEMO_QUESTIONS = [
+  "Does your organization have a formal access control policy? How do you manage user access provisioning and deprovisioning?",
+  "How does your organization protect data at rest and in transit? Please describe your encryption standards.",
+  "Describe your incident response process. How quickly can your team detect, respond to, and recover from a security incident?"
+].join("\n\n");
 
 function normalizeQuestions(raw: string): QuestionInput[] {
   const lines = raw
@@ -24,111 +24,89 @@ function normalizeQuestions(raw: string): QuestionInput[] {
   }));
 }
 
-function countQuestions(raw: string): number {
-  return normalizeQuestions(raw).length;
+function clampQuestions(raw: string): string {
+  const normalized = normalizeQuestions(raw);
+  return normalized.map((q) => q.text).join("\n");
 }
+
+function statusPillColor(status: AnswerReviewStatus): string {
+  switch (status) {
+    case "approved":
+      return "rgba(34, 197, 94, 0.18)";
+    case "edited":
+      return "rgba(56, 189, 248, 0.18)";
+    case "flagged":
+      return "rgba(249, 115, 22, 0.18)";
+    case "draft":
+    default:
+      return "rgba(148, 163, 184, 0.15)";
+  }
+}
+
+function statusTextColor(status: AnswerReviewStatus): string {
+  switch (status) {
+    case "approved":
+      return "#86efac";
+    case "edited":
+      return "#7dd3fc";
+    case "flagged":
+      return "#fdba74";
+    case "draft":
+    default:
+      return "#cbd5e1";
+  }
+}
+
+type AgentStep = {
+  key: "ingestion" | "retrieval" | "drafting" | "citation";
+  label: string;
+  sublabel: string;
+};
+
+const AGENT_STEPS: AgentStep[] = [
+  { key: "ingestion", label: "Ingestion Agent", sublabel: "Parsing questions" },
+  { key: "retrieval", label: "Retrieval Agent", sublabel: "Finding evidence in KB" },
+  { key: "drafting", label: "Drafting Agent", sublabel: "Formulating answers" },
+  { key: "citation", label: "Citation Agent", sublabel: "Attaching sources" }
+];
 
 export const App: React.FC = () => {
   const [uiState, setUiState] = useState<UiState>("idle");
   const [rawInput, setRawInput] = useState("");
   const [results, setResults] = useState<ResultItem[] | null>(null);
-  const [runs, setRuns] = useState<RunSummary[]>([]);
-  const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+
   const [exportWithFlagged, setExportWithFlagged] = useState(false);
+  const [expandedEvidence, setExpandedEvidence] = useState<Record<string, boolean>>({});
+  const [showNotes, setShowNotes] = useState<Record<string, boolean>>({});
 
-  const questionCount = useMemo(() => countQuestions(rawInput), [rawInput]);
-  const hasTooManyQuestions = questionCount > MAX_QUESTIONS;
+  const [runStartedAtMs, setRunStartedAtMs] = useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
+  const [activeStepIndex, setActiveStepIndex] = useState<number>(0);
+  const intervalRef = useRef<number | null>(null);
+  const stepTimeoutsRef = useRef<number[]>([]);
+  const startedAtRef = useRef<number | null>(null);
+
+  const questionCount = useMemo(() => normalizeQuestions(rawInput).length, [rawInput]);
+  const hasTooManyQuestions = useMemo(() => {
+    const nonEmpty = rawInput
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean).length;
+    return nonEmpty > MAX_QUESTIONS;
+  }, [rawInput]);
+
   const canStart =
-    uiState !== "running" &&
-    questionCount > 0 &&
-    !hasTooManyQuestions;
+    uiState !== "running" && questionCount > 0 && !hasTooManyQuestions;
 
-  async function handleStartRun() {
-    if (!canStart) return;
-
-    const questions = normalizeQuestions(rawInput);
-    if (questions.length === 0) return;
-
-    setUiState((prev) => transition(prev, { type: "START" }));
-    setLastUpdated(new Date().toISOString());
-    setError(null);
-
-    const startedAt = new Date().toISOString();
-
-    try {
-      const { runId, results: runResults } = await startRun(questions);
-
-      const summary: RunSummary = {
-        runId,
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        status: "completed",
-        questionCount: questions.length
-      };
-
-      setRuns((prev) => [summary, ...prev]);
-      setActiveRunId(runId);
-      setResults(runResults ?? null);
-      setExportWithFlagged(false);
-      setUiState((prev) => transition(prev, { type: "RESOLVE" }));
-      setLastUpdated(new Date().toISOString());
-    } catch (e) {
-      const message =
-        e instanceof Error ? e.message : "Unknown error starting run.";
-      setError(message);
-
-      const failedSummary: RunSummary = {
-        runId: `failed-${Date.now()}`,
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        status: "failed",
-        questionCount: questions.length,
-        lastError: message
-      };
-
-      setRuns((prev) => [failedSummary, ...prev]);
-      setUiState((prev) => transition(prev, { type: "FAIL" }));
-      setLastUpdated(new Date().toISOString());
-    }
-  }
-
-  function handleNewRun() {
-    setUiState((prev) => transition(prev, { type: "RESET" }));
-    setResults(null);
-    setActiveRunId(null);
-    setError(null);
-    setLastUpdated(new Date().toISOString());
-    setExportWithFlagged(false);
-  }
-
-  function updateResult(
-    questionId: string,
-    patch: Partial<
-      Pick<
-        ResultItem,
-        "status" | "review_notes" | "reviewed_by" | "reviewed_at"
-      >
-    >
-  ) {
-    setResults((prev) => {
-      if (!prev) return prev;
-      return prev.map((r) =>
-        r.questionId === questionId
-          ? {
-              ...r,
-              ...patch
-            }
-          : r
-      );
-    });
-    setLastUpdated(new Date().toISOString());
-  }
+  const viewMode: "input" | "running" | "results" = useMemo(() => {
+    if (uiState === "running") return "running";
+    if (results && results.length > 0) return "results";
+    return "input";
+  }, [uiState, results]);
 
   const canExport = useMemo(() => {
     if (!results || results.length === 0) return false;
-
     const allNonDraft = results.every((r) => r.status !== "draft");
     if (!allNonDraft) return false;
 
@@ -147,9 +125,120 @@ export const App: React.FC = () => {
     );
   }, [results, exportWithFlagged]);
 
-  function handleExport() {
-    if (!canExport || !results || results.length === 0) return;
+  const reviewProgress = useMemo(() => {
+    const counts: Record<AnswerReviewStatus, number> = {
+      draft: 0,
+      approved: 0,
+      edited: 0,
+      flagged: 0
+    };
+    for (const r of results ?? []) {
+      counts[r.status] += 1;
+    }
+    return counts;
+  }, [results]);
 
+  function clearTimers() {
+    if (intervalRef.current) {
+      window.clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    stepTimeoutsRef.current.forEach((t) => window.clearTimeout(t));
+    stepTimeoutsRef.current = [];
+  }
+
+  function startTimers() {
+    clearTimers();
+    intervalRef.current = window.setInterval(() => {
+      const startedAt = startedAtRef.current;
+      if (startedAt == null) return;
+      setElapsedSeconds(Math.max(0, Math.round((Date.now() - startedAt) / 100) / 10));
+    }, 100);
+
+    // Simulated step progression so the demo looks alive even if backend returns fast.
+    const schedule = [1400, 3000, 4800] as const;
+    schedule.forEach((ms, idx) => {
+      const t = window.setTimeout(() => setActiveStepIndex(idx + 1), ms);
+      stepTimeoutsRef.current.push(t);
+    });
+  }
+
+  async function handleStartRun() {
+    if (!canStart) return;
+    const questions = normalizeQuestions(rawInput);
+    if (questions.length === 0) return;
+
+    setError(null);
+    setExportWithFlagged(false);
+    setResults(null);
+    setExpandedEvidence({});
+    setShowNotes({});
+
+    setUiState((prev) => transition(prev, { type: "START" }));
+    setActiveStepIndex(0);
+    const started = Date.now();
+    startedAtRef.current = started;
+    setRunStartedAtMs(started);
+    setElapsedSeconds(0);
+    startTimers();
+
+    try {
+      const { results: runResults } = await startRun(questions);
+      clearTimers();
+      setActiveStepIndex(AGENT_STEPS.length - 1);
+
+      // Ensure review fields exist (demo-friendly defaults).
+      const normalizedResults =
+        (runResults ?? []).map((r) => ({
+          ...r,
+          status: r.status ?? "draft"
+        })) ?? null;
+
+      setResults(normalizedResults);
+      setUiState((prev) => transition(prev, { type: "RESOLVE" }));
+    } catch (e) {
+      clearTimers();
+      setError(e instanceof Error ? e.message : "Unknown error starting run.");
+      setUiState((prev) => transition(prev, { type: "FAIL" }));
+    }
+  }
+
+  function handleStartOver() {
+    clearTimers();
+    startedAtRef.current = null;
+    setUiState((prev) => transition(prev, { type: "RESET" }));
+    setResults(null);
+    setError(null);
+    setExportWithFlagged(false);
+    setActiveStepIndex(0);
+    setRunStartedAtMs(null);
+    setElapsedSeconds(0);
+    setExpandedEvidence({});
+    setShowNotes({});
+  }
+
+  function updateResult(
+    questionId: string,
+    patch: Partial<Pick<ResultItem, "status" | "review_notes" | "reviewed_by" | "reviewed_at">>
+  ) {
+    setResults((prev) => {
+      if (!prev) return prev;
+      return prev.map((r) => (r.questionId === questionId ? { ...r, ...patch } : r));
+    });
+  }
+
+  function setStatus(questionId: string, status: AnswerReviewStatus) {
+    const patch: Partial<ResultItem> = { status };
+    if (status === "approved" || status === "edited" || status === "flagged") {
+      patch.reviewed_at = new Date().toISOString();
+    } else {
+      patch.reviewed_at = undefined;
+    }
+    updateResult(questionId, patch);
+  }
+
+  function handleExportJson() {
+    if (!canExport || !results || results.length === 0) return;
     const blob = new Blob([JSON.stringify({ results }, null, 2)], {
       type: "application/json"
     });
@@ -166,39 +255,33 @@ export const App: React.FC = () => {
   function handleExportPdf() {
     if (!canExport || !results || results.length === 0) return;
 
-    const doc = new jsPDF({
-      unit: "pt",
-      format: "letter"
-    });
-
+    const doc = new jsPDF({ unit: "pt", format: "letter" });
     const left = 48;
-    const rightMargin = 48;
+    const right = 48;
     const pageWidth = doc.internal.pageSize.getWidth();
-    const maxWidth = pageWidth - left - rightMargin;
-
+    const maxWidth = pageWidth - left - right;
     let y = 56;
 
     doc.setFont("helvetica", "bold");
     doc.setFontSize(16);
-    doc.text("Security Questionnaire Review (MVP1)", left, y);
+    doc.text("Security Questionnaire Review", left, y);
     y += 18;
 
     doc.setFont("helvetica", "normal");
     doc.setFontSize(10);
     doc.text(`Generated: ${new Date().toLocaleString()}`, left, y);
-    y += 18;
+    y += 22;
+
+    const ensureSpace = (needed: number) => {
+      const pageHeight = doc.internal.pageSize.getHeight();
+      if (y + needed > pageHeight - 56) {
+        doc.addPage();
+        y = 56;
+      }
+    };
 
     results.forEach((r, idx) => {
-      const ensureSpace = (needed: number) => {
-        const pageHeight = doc.internal.pageSize.getHeight();
-        if (y + needed > pageHeight - 56) {
-          doc.addPage();
-          y = 56;
-        }
-      };
-
-      ensureSpace(60);
-
+      ensureSpace(80);
       doc.setFont("helvetica", "bold");
       doc.setFontSize(12);
       doc.text(`Q${idx + 1}:`, left, y);
@@ -216,51 +299,42 @@ export const App: React.FC = () => {
       doc.setFontSize(10);
       doc.text(`Status: ${r.status}`, left, y);
       y += 14;
-
       if (r.reviewed_by) {
         doc.text(`Reviewed by: ${r.reviewed_by}`, left, y);
         y += 14;
       }
       if (r.reviewed_at) {
-        doc.text(
-          `Reviewed at: ${new Date(r.reviewed_at).toLocaleString()}`,
-          left,
-          y
-        );
+        doc.text(`Reviewed at: ${new Date(r.reviewed_at).toLocaleString()}`, left, y);
         y += 14;
       }
       if (r.review_notes) {
-        const noteLines = doc.splitTextToSize(
-          `Notes: ${r.review_notes}`,
-          maxWidth
-        );
+        const noteLines = doc.splitTextToSize(`Notes: ${r.review_notes}`, maxWidth);
         doc.text(noteLines, left, y);
         y += noteLines.length * 12 + 4;
       }
 
       doc.setFont("helvetica", "bold");
-      doc.text("Citations:", left, y);
+      doc.text("Evidence sources:", left, y);
       y += 14;
       doc.setFont("helvetica", "normal");
-
       if (r.citations.length === 0) {
         doc.text("No evidence available.", left, y);
         y += 14;
       } else {
         r.citations.forEach((c) => {
-          const citationText = `${c.document} · ${c.section} — ${c.snippet}`;
-          const cLines = doc.splitTextToSize(`- ${citationText}`, maxWidth);
-          ensureSpace(14 + cLines.length * 12);
-          doc.text(cLines, left, y);
-          y += cLines.length * 12 + 2;
+          const txt = `- ${c.document} · ${c.section} — ${c.snippet}`;
+          const lines = doc.splitTextToSize(txt, maxWidth);
+          ensureSpace(14 + lines.length * 12);
+          doc.text(lines, left, y);
+          y += lines.length * 12 + 2;
         });
       }
 
       y += 10;
-      ensureSpace(10);
       doc.setDrawColor(148, 163, 184);
       doc.setLineWidth(0.5);
-      doc.line(left, y, pageWidth - rightMargin, y);
+      ensureSpace(14);
+      doc.line(left, y, pageWidth - right, y);
       y += 14;
     });
 
@@ -271,281 +345,377 @@ export const App: React.FC = () => {
     );
   }
 
-  const disableInput = uiState === "running";
+  const shellBg = {
+    minHeight: "100vh",
+    color: "#e5e7eb",
+    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+    background:
+      "radial-gradient(1000px 600px at 50% 10%, rgba(99,102,241,0.25), transparent 60%), radial-gradient(900px 600px at 80% 40%, rgba(168,85,247,0.20), transparent 60%), radial-gradient(900px 700px at 20% 55%, rgba(56,189,248,0.14), transparent 60%), linear-gradient(180deg, #020617 0%, #0b1024 55%, #020617 100%)"
+  } as const;
 
-  const crewStatusLabel =
-    uiState === "running"
-      ? "Crew: running"
-      : uiState === "done"
-      ? error
-        ? "Crew: error"
-        : "Crew: done"
-      : "Crew: idle";
-
-  const crewStatusColor =
-    uiState === "running"
-      ? "#38bdf8"
-      : uiState === "done"
-      ? error
-        ? "#f97373"
-        : "#22c55e"
-      : "#9ca3af";
-
-  let progressLabel: string | null = null;
-  if (uiState === "running") {
-    progressLabel = "Processing: Parsing → Finding evidence → Drafting → Attaching citations…";
-  }
-
-  const exportHelperText = useMemo(() => {
-    if (!results || results.length === 0) return null;
-    if (canExport) {
-      return exportWithFlagged
-        ? "Export enabled (including flagged items)."
-        : "Export enabled (all answers approved/edited).";
-    }
-
-    const hasDraft = results.some((r) => r.status === "draft");
-    if (hasDraft) return "Export disabled: all answers must be reviewed (no drafts).";
-
-    if (!exportWithFlagged) {
-      return "Export disabled: approve/edit all answers, or choose “Export with flagged items”.";
-    }
-
-    return "Export disabled: answers must be approved/edited/flagged.";
-  }, [results, canExport, exportWithFlagged]);
+  const glass = {
+    backgroundColor: "rgba(2, 6, 23, 0.6)",
+    border: "1px solid rgba(148, 163, 184, 0.22)",
+    boxShadow: "0 20px 60px rgba(0, 0, 0, 0.45)",
+    backdropFilter: "blur(10px)"
+  } as const;
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-        backgroundColor: "#0f172a",
-        color: "#e5e7eb"
-      }}
-    >
-      <header
+    <div style={shellBg}>
+      <nav
         style={{
-          padding: "1.5rem 2rem",
-          borderBottom: "1px solid rgba(148, 163, 184, 0.3)"
+          height: 64,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "0 28px",
+          borderBottom: "1px solid rgba(148, 163, 184, 0.14)",
+          backgroundColor: "rgba(2, 6, 23, 0.55)",
+          backdropFilter: "blur(12px)"
         }}
       >
-        <h1 style={{ fontSize: "1.5rem", fontWeight: 600 }}>
-          Security Questionnaire Review
-        </h1>
-        <p style={{ marginTop: "0.25rem", color: "#9ca3af" }}>
-          First draft with evidence-grade citations in under 90 seconds.
-        </p>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 12,
+              background:
+                "linear-gradient(135deg, rgba(99,102,241,1), rgba(168,85,247,1))",
+              display: "grid",
+              placeItems: "center",
+              boxShadow: "0 10px 20px rgba(99,102,241,0.25)"
+            }}
+            aria-hidden
+          >
+            <span style={{ fontWeight: 800 }}>✓</span>
+          </div>
+          <div style={{ lineHeight: 1.1 }}>
+            <div style={{ fontWeight: 700 }}>EvidenceFlow</div>
+            <div style={{ fontSize: 11, color: "#94a3b8" }}>
+              AUTOMATED SECURITY RESPONSES
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 18, color: "#cbd5e1", fontSize: 14 }}>
+          <span style={{ opacity: 0.9 }}>Dashboard</span>
+          <span style={{ opacity: 0.9 }}>Knowledge Base</span>
+          <span style={{ opacity: 0.9 }}>Settings</span>
+        </div>
 
         <div
           style={{
-            marginTop: "0.75rem",
-            padding: "0.5rem 0.9rem",
-            borderRadius: "999px",
-            border: "1px solid rgba(148, 163, 184, 0.5)",
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "0.6rem",
-            fontSize: "0.85rem",
-            backgroundColor: "rgba(15, 23, 42, 0.9)"
+            width: 34,
+            height: 34,
+            borderRadius: 999,
+            backgroundColor: "rgba(148,163,184,0.15)",
+            border: "1px solid rgba(148,163,184,0.22)",
+            display: "grid",
+            placeItems: "center",
+            fontSize: 13,
+            color: "#e2e8f0"
           }}
-          aria-label="Crew status"
+          aria-label="User"
         >
-          <span
-            style={{
-              width: 10,
-              height: 10,
-              borderRadius: "999px",
-              backgroundColor: crewStatusColor,
-              boxShadow: `0 0 10px ${crewStatusColor}`
-            }}
-          />
-          <span>{crewStatusLabel}</span>
-          {lastUpdated && (
-            <span style={{ color: "#9ca3af", fontSize: "0.8rem" }}>
-              • Last updated:{" "}
-              {new Date(lastUpdated).toLocaleTimeString()}
-            </span>
-          )}
+          JD
         </div>
-      </header>
+      </nav>
 
-      <main
-        style={{
-          display: "grid",
-          gridTemplateColumns: "3fr 2fr",
-          gap: "1.5rem",
-          padding: "1.5rem 2rem",
-          flex: 1
-        }}
-      >
-        <section
-          aria-label="Question input and results"
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: "1rem"
-          }}
-        >
-          <div
-            style={{
-              padding: "1rem 1.25rem",
-              borderRadius: "0.75rem",
-              backgroundColor: "#020617",
-              border: "1px solid rgba(148, 163, 184, 0.35)"
-            }}
-          >
-            <div style={{ marginBottom: "0.5rem" }}>
-              <label
-                htmlFor="questions"
-                style={{ fontWeight: 500, display: "block", marginBottom: 4 }}
-              >
-                Questions (1–5)
-              </label>
-              <p style={{ fontSize: "0.85rem", color: "#9ca3af" }}>
-                Paste up to 5 security questionnaire items, one per line.
-              </p>
-            </div>
-            <textarea
-              id="questions"
-              value={rawInput}
-              onChange={(e) => {
-                if (uiState === "done") {
-                  setUiState((prev) => transition(prev, { type: "RESET" }));
-                }
-                setRawInput(e.target.value);
-              }}
-              disabled={disableInput}
-              rows={8}
-              style={{
-                width: "100%",
-                borderRadius: "0.5rem",
-                border: "1px solid rgba(148, 163, 184, 0.6)",
-                padding: "0.75rem",
-                fontSize: "0.95rem",
-                backgroundColor: disableInput ? "#020617" : "#020817",
-                color: "#e5e7eb",
-                resize: "vertical"
-              }}
-              placeholder={[
-                "Does your organization enforce multi-factor authentication (MFA) for production access?",
-                "How are security patches and updates applied to critical systems?",
-                "Describe how access to customer data is logged and monitored."
-              ].join("\n")}
-            />
-            <div
-              style={{
-                marginTop: "0.5rem",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                fontSize: "0.8rem"
-              }}
-            >
-              <span
-                style={{
-                  color: hasTooManyQuestions ? "#f97373" : "#9ca3af"
-                }}
-              >
-                {questionCount} / {MAX_QUESTIONS} questions
-                {hasTooManyQuestions
-                  ? " — please reduce to 5."
-                  : null}
-              </span>
-            </div>
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.75rem"
-            }}
-          >
-            <button
-              type="button"
-              onClick={handleStartRun}
-              disabled={!canStart}
-              style={{
-                padding: "0.6rem 1.4rem",
-                borderRadius: "999px",
-                border: "none",
-                cursor: canStart ? "pointer" : "not-allowed",
-                background: canStart
-                  ? "linear-gradient(135deg, #22c55e, #16a34a)"
-                  : "rgba(55, 65, 81, 0.9)",
-                color: "#020617",
-                fontWeight: 600,
-                fontSize: "0.95rem"
-              }}
-            >
-              {uiState === "running" ? "Running…" : "Start run"}
-            </button>
-
-            {uiState === "done" && (
-              <button
-                type="button"
-                onClick={handleNewRun}
-                style={{
-                  padding: "0.5rem 1.1rem",
-                  borderRadius: "999px",
-                  border: "1px solid rgba(148, 163, 184, 0.6)",
-                  backgroundColor: "transparent",
-                  color: "#e5e7eb",
-                  cursor: "pointer",
-                  fontSize: "0.9rem"
-                }}
-              >
-                New run
-              </button>
-            )}
-
-            {results && results.length > 0 && (
+      {viewMode === "input" && (
+        <main style={{ padding: "54px 18px 84px" }}>
+          <div style={{ maxWidth: 980, margin: "0 auto" }}>
+            <div style={{ textAlign: "center", marginBottom: 28 }}>
               <div
                 style={{
-                  marginLeft: "auto",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.75rem"
+                  fontSize: 56,
+                  fontWeight: 750,
+                  letterSpacing: "-0.03em",
+                  lineHeight: 1.02
                 }}
               >
-                <label
+                Answer Questionnaires
+                <br />
+                with Evidence.
+              </div>
+              <p
+                style={{
+                  marginTop: 14,
+                  color: "#94a3b8",
+                  fontSize: 18,
+                  maxWidth: 720,
+                  marginLeft: "auto",
+                  marginRight: "auto"
+                }}
+              >
+                Paste your vendor security questions below. Our 4-agent AI pipeline will
+                retrieve policies from your Knowledge Base and draft cited responses in seconds.
+              </p>
+            </div>
+
+            <section
+              style={{
+                ...glass,
+                borderRadius: 18,
+                padding: 22
+              }}
+              aria-label="Security Questions"
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  marginBottom: 12
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ color: "#a78bfa", fontWeight: 700 }}>▤</span>
+                  <div style={{ fontWeight: 650 }}>Security Questions</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRawInput(DEMO_QUESTIONS)}
                   style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "0.45rem",
-                    fontSize: "0.85rem",
-                    color: "#9ca3af",
-                    userSelect: "none"
+                    background: "transparent",
+                    border: "none",
+                    color: "#cbd5e1",
+                    fontSize: 14,
+                    cursor: "pointer",
+                    opacity: 0.85
                   }}
                 >
-                  <input
-                    type="checkbox"
-                    checked={exportWithFlagged}
-                    onChange={(e) => setExportWithFlagged(e.target.checked)}
-                    style={{ accentColor: "#38bdf8" }}
-                  />
-                  Export with flagged items
-                </label>
+                  Load Demo Questions
+                </button>
+              </div>
+
+              <textarea
+                value={rawInput}
+                onChange={(e) => setRawInput(e.target.value)}
+                rows={8}
+                placeholder={DEMO_QUESTIONS}
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  maxWidth: "100%",
+                  borderRadius: 14,
+                  border: "1px solid rgba(148,163,184,0.20)",
+                  backgroundColor: "rgba(2, 6, 23, 0.55)",
+                  color: "#e5e7eb",
+                  padding: 16,
+                  fontSize: 16,
+                  lineHeight: 1.5,
+                  outline: "none",
+                  resize: "vertical"
+                }}
+              />
+
+              <div
+                style={{
+                  marginTop: 14,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 16
+                }}
+              >
+                <div style={{ color: "#94a3b8", fontSize: 13 }}>
+                  Supports max {MAX_QUESTIONS} questions for this MVP demo.
+                  {hasTooManyQuestions ? (
+                    <span style={{ color: "#fda4af" }}>
+                      {" "}
+                      You entered more than {MAX_QUESTIONS}.
+                    </span>
+                  ) : null}
+                </div>
 
                 <button
                   type="button"
-                  onClick={handleExport}
-                  disabled={!canExport}
+                  onClick={handleStartRun}
+                  disabled={!canStart}
                   style={{
-                    padding: "0.5rem 1.1rem",
-                    borderRadius: "999px",
-                    border: "1px solid rgba(148, 163, 184, 0.6)",
-                    backgroundColor: canExport
-                      ? "#020617"
-                      : "rgba(55, 65, 81, 0.9)",
-                    color: "#e5e7eb",
-                    cursor: canExport ? "pointer" : "not-allowed",
-                    fontSize: "0.9rem"
+                    padding: "14px 22px",
+                    borderRadius: 999,
+                    border: "1px solid rgba(148,163,184,0.18)",
+                    background: canStart
+                      ? "linear-gradient(135deg, rgba(99,102,241,1), rgba(168,85,247,1))"
+                      : "rgba(148,163,184,0.18)",
+                    color: "#0b1024",
+                    fontWeight: 750,
+                    fontSize: 16,
+                    cursor: canStart ? "pointer" : "not-allowed",
+                    minWidth: 220
                   }}
                 >
-                  Export JSON
+                  Generate Answers →
+                </button>
+              </div>
+            </section>
+
+            {error && (
+              <div
+                role="alert"
+                style={{
+                  marginTop: 14,
+                  padding: "12px 14px",
+                  borderRadius: 12,
+                  backgroundColor: "rgba(127, 29, 29, 0.6)",
+                  border: "1px solid rgba(248,113,113,0.35)",
+                  color: "#fee2e2",
+                  maxWidth: 980,
+                  marginLeft: "auto",
+                  marginRight: "auto"
+                }}
+              >
+                {error}
+              </div>
+            )}
+          </div>
+        </main>
+      )}
+
+      {viewMode === "running" && (
+        <main style={{ padding: "56px 18px 84px" }}>
+          <div
+            style={{
+              maxWidth: 640,
+              margin: "0 auto",
+              ...glass,
+              borderRadius: 22,
+              padding: "42px 38px"
+            }}
+          >
+            <div style={{ display: "grid", placeItems: "center", marginBottom: 22 }}>
+              <div
+                style={{
+                  width: 88,
+                  height: 88,
+                  borderRadius: 999,
+                  border: "4px solid rgba(99,102,241,0.35)",
+                  borderTopColor: "rgba(168,85,247,0.95)",
+                  boxShadow: "0 0 40px rgba(168,85,247,0.18)",
+                  animation: "spin 1.1s linear infinite"
+                }}
+              />
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 22, fontWeight: 750 }}>AI Agents Working</div>
+              <div style={{ marginTop: 6, color: "#94a3b8" }}>
+                Elapsed time: {elapsedSeconds.toFixed(1)}s
+              </div>
+            </div>
+
+            <div style={{ marginTop: 30, display: "flex", flexDirection: "column", gap: 14 }}>
+              {AGENT_STEPS.map((s, idx) => {
+                const isDone = idx < activeStepIndex;
+                const isActive = idx === activeStepIndex;
+                const icon = isDone ? "✓" : isActive ? "●" : "○";
+                return (
+                  <div
+                    key={s.key}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 12,
+                      padding: "12px 14px",
+                      borderRadius: 14,
+                      border: "1px solid rgba(148,163,184,0.18)",
+                      backgroundColor: isActive
+                        ? "rgba(99,102,241,0.14)"
+                        : "rgba(2,6,23,0.3)",
+                      opacity: idx > activeStepIndex ? 0.55 : 1
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 999,
+                        display: "grid",
+                        placeItems: "center",
+                        backgroundColor: isDone
+                          ? "rgba(34,197,94,0.18)"
+                          : isActive
+                          ? "rgba(168,85,247,0.20)"
+                          : "rgba(148,163,184,0.14)",
+                        border: "1px solid rgba(148,163,184,0.22)",
+                        color: isDone
+                          ? "#86efac"
+                          : isActive
+                          ? "#c4b5fd"
+                          : "#cbd5e1",
+                        fontWeight: 800,
+                        fontSize: 12
+                      }}
+                    >
+                      {icon}
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 650 }}>
+                        {s.label}:{" "}
+                        <span style={{ color: "#cbd5e1", fontWeight: 600 }}>
+                          {s.sublabel}
+                        </span>
+                      </div>
+                    </div>
+                    <div style={{ color: "#94a3b8" }}>•••</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ marginTop: 26, textAlign: "center", color: "#94a3b8", fontSize: 12 }}>
+              Status: drafting
+            </div>
+          </div>
+
+          <style>{`
+            @keyframes spin {
+              from { transform: rotate(0deg); }
+              to { transform: rotate(360deg); }
+            }
+          `}</style>
+        </main>
+      )}
+
+      {viewMode === "results" && (
+        <main style={{ padding: "44px 18px 84px" }}>
+          <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+            <header
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                justifyContent: "space-between",
+                gap: 18,
+                marginBottom: 16
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 34, fontWeight: 780, letterSpacing: "-0.02em" }}>
+                  Draft Complete
+                </div>
+                <div style={{ marginTop: 6, color: "#94a3b8" }}>
+                  Processed {results?.length ?? 0} question
+                  {(results?.length ?? 0) === 1 ? "" : "s"} in{" "}
+                  {elapsedSeconds.toFixed(1)}s.
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <button
+                  type="button"
+                  onClick={handleStartOver}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 14,
+                    border: "1px solid rgba(148,163,184,0.22)",
+                    backgroundColor: "rgba(2,6,23,0.35)",
+                    color: "#e5e7eb",
+                    cursor: "pointer",
+                    fontWeight: 650
+                  }}
+                >
+                  ↺ Start Over
                 </button>
 
                 <button
@@ -553,439 +723,431 @@ export const App: React.FC = () => {
                   onClick={handleExportPdf}
                   disabled={!canExport}
                   style={{
-                    padding: "0.5rem 1.1rem",
-                    borderRadius: "999px",
-                    border: "1px solid rgba(148, 163, 184, 0.6)",
-                    backgroundColor: canExport
-                      ? "rgba(168, 85, 247, 0.18)"
-                      : "rgba(55, 65, 81, 0.9)",
-                    color: "#e5e7eb",
+                    padding: "10px 14px",
+                    borderRadius: 14,
+                    border: "1px solid rgba(148,163,184,0.18)",
+                    background: canExport
+                      ? "linear-gradient(135deg, rgba(99,102,241,1), rgba(168,85,247,1))"
+                      : "rgba(148,163,184,0.18)",
+                    color: "#0b1024",
                     cursor: canExport ? "pointer" : "not-allowed",
-                    fontSize: "0.9rem"
+                    fontWeight: 750,
+                    opacity: canExport ? 1 : 0.7
                   }}
                 >
-                  Export PDF
+                  ⬇ Export PDF
                 </button>
               </div>
+            </header>
+
+            <div
+              style={{
+                ...glass,
+                borderRadius: 16,
+                padding: "12px 14px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 14,
+                marginBottom: 18
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 10, color: "#cbd5e1" }}>
+                <span style={{ color: "#94a3b8", fontSize: 13 }}>Review Progress:</span>
+                <span style={{ fontSize: 13 }}>
+                  {reviewProgress.draft} draft
+                  {reviewProgress.draft === 1 ? "" : "s"}
+                </span>
+                {reviewProgress.flagged > 0 && (
+                  <span style={{ fontSize: 13, color: "#fdba74" }}>
+                    • {reviewProgress.flagged} flagged
+                  </span>
+                )}
+                {reviewProgress.approved > 0 && (
+                  <span style={{ fontSize: 13, color: "#86efac" }}>
+                    • {reviewProgress.approved} approved
+                  </span>
+                )}
+                {reviewProgress.edited > 0 && (
+                  <span style={{ fontSize: 13, color: "#7dd3fc" }}>
+                    • {reviewProgress.edited} edited
+                  </span>
+                )}
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <label
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 8,
+                    fontSize: 13,
+                    color: "#94a3b8",
+                    userSelect: "none"
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={exportWithFlagged}
+                    onChange={(e) => setExportWithFlagged(e.target.checked)}
+                    style={{ accentColor: "#a78bfa" }}
+                  />
+                  Export with flagged items
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleExportJson}
+                  disabled={!canExport}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(148,163,184,0.22)",
+                    backgroundColor: canExport
+                      ? "rgba(2, 6, 23, 0.5)"
+                      : "rgba(148,163,184,0.12)",
+                    color: "#e5e7eb",
+                    cursor: canExport ? "pointer" : "not-allowed",
+                    fontWeight: 650,
+                    fontSize: 13
+                  }}
+                >
+                  Export JSON
+                </button>
+              </div>
+            </div>
+
+            {!canExport && (
+              <div style={{ color: "#94a3b8", fontSize: 13, marginBottom: 16 }}>
+                Review all answers to enable export.
+              </div>
             )}
-          </div>
 
-          {exportHelperText && (
-            <div
-              style={{
-                marginTop: "0.35rem",
-                fontSize: "0.8rem",
-                color: canExport ? "#86efac" : "#9ca3af"
-              }}
-            >
-              {exportHelperText}
-            </div>
-          )}
-
-          {progressLabel && (
-            <div
-              style={{
-                marginTop: "0.5rem",
-                fontSize: "0.85rem",
-                color: "#a855f7"
-              }}
-            >
-              {progressLabel}
-            </div>
-          )}
-
-          {error && (
-            <div
-              role="alert"
-              style={{
-                marginTop: "0.5rem",
-                padding: "0.7rem 0.9rem",
-                borderRadius: "0.5rem",
-                backgroundColor: "rgba(127, 29, 29, 0.8)",
-                color: "#fee2e2",
-                fontSize: "0.85rem"
-              }}
-            >
-              {error}
-            </div>
-          )}
-
-          <div
-            style={{
-              marginTop: "0.5rem",
-              padding: "1rem 1.25rem",
-              borderRadius: "0.75rem",
-              backgroundColor: "#020617",
-              border: "1px solid rgba(148, 163, 184, 0.35)",
-              flex: 1,
-              overflowY: "auto"
-            }}
-          >
-            <h2
-              style={{
-                fontSize: "1rem",
-                fontWeight: 500,
-                marginBottom: "0.75rem"
-              }}
-            >
-              Results
-            </h2>
-
-            {!results || results.length === 0 ? (
-              <p style={{ fontSize: "0.9rem", color: "#9ca3af" }}>
-                Start a run to see draft answers and evidence-grade citations.
-              </p>
-            ) : (
-              <ul
+            {error && (
+              <div
+                role="alert"
                 style={{
-                  listStyle: "none",
-                  padding: 0,
-                  margin: 0,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "0.75rem"
+                  marginBottom: 16,
+                  padding: "12px 14px",
+                  borderRadius: 12,
+                  backgroundColor: "rgba(127, 29, 29, 0.6)",
+                  border: "1px solid rgba(248,113,113,0.35)",
+                  color: "#fee2e2"
                 }}
               >
-                {results.map((item) => (
-                  <li
+                {error}
+              </div>
+            )}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {(results ?? []).map((item, idx) => {
+                const isExpanded = expandedEvidence[item.questionId] ?? true;
+                const showItemNotes = showNotes[item.questionId] ?? false;
+
+                return (
+                  <section
                     key={item.questionId}
                     style={{
-                      padding: "0.9rem 1rem",
-                      borderRadius: "0.75rem",
-                      background:
-                        "radial-gradient(circle at top left, rgba(37, 99, 235, 0.18), #020617)",
-                      border: "1px solid rgba(148, 163, 184, 0.45)"
+                      ...glass,
+                      borderRadius: 18,
+                      padding: 18
                     }}
                   >
                     <div
                       style={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        justifyContent: "space-between",
+                        gap: 14
+                      }}
+                    >
+                      <div style={{ display: "flex", gap: 12, flex: 1 }}>
+                        <div
+                          style={{
+                            width: 28,
+                            height: 28,
+                            borderRadius: 999,
+                            display: "grid",
+                            placeItems: "center",
+                            backgroundColor: "rgba(99,102,241,0.18)",
+                            border: "1px solid rgba(99,102,241,0.25)",
+                            color: "#c4b5fd",
+                            fontWeight: 800,
+                            fontSize: 13,
+                            marginTop: 2
+                          }}
+                        >
+                          {idx + 1}
+                        </div>
+
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 18, fontWeight: 750, lineHeight: 1.25 }}>
+                            {item.questionText}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 999,
+                          backgroundColor: statusPillColor(item.status),
+                          border: "1px solid rgba(148,163,184,0.18)",
+                          color: statusTextColor(item.status),
+                          fontSize: 13,
+                          fontWeight: 700,
+                          textTransform: "capitalize",
+                          whiteSpace: "nowrap"
+                        }}
+                      >
+                        {item.status}
+                      </div>
+                    </div>
+
+                    <p style={{ marginTop: 12, color: "#cbd5e1", lineHeight: 1.6 }}>
+                      {item.answer}
+                    </p>
+
+                    <div
+                      style={{
+                        marginTop: 14,
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "space-between",
-                        gap: "0.75rem",
-                        marginBottom: "0.35rem"
+                        gap: 12,
+                        flexWrap: "wrap"
                       }}
                     >
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span style={{ color: "#94a3b8", fontSize: 13 }}>Set status:</span>
+
+                        {(
+                          [
+                            ["approved", "Approve"],
+                            ["edited", "Edited"],
+                            ["flagged", "Flag"],
+                            ["draft", "Draft"]
+                          ] as const
+                        ).map(([status, label]) => {
+                          const isSelected = item.status === status;
+                          return (
+                            <button
+                              key={status}
+                              type="button"
+                              onClick={() => setStatus(item.questionId, status)}
+                              style={{
+                                padding: "7px 10px",
+                                borderRadius: 999,
+                                border: "1px solid rgba(148,163,184,0.22)",
+                                backgroundColor: isSelected
+                                  ? "rgba(99,102,241,0.18)"
+                                  : "rgba(2,6,23,0.35)",
+                                color: "#e5e7eb",
+                                cursor: "pointer",
+                                fontSize: 13,
+                                fontWeight: 650
+                              }}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setShowNotes((prev) => ({
+                            ...prev,
+                            [item.questionId]: !showItemNotes
+                          }))
+                        }
+                        style={{
+                          background: "transparent",
+                          border: "none",
+                          color: "#cbd5e1",
+                          cursor: "pointer",
+                          fontSize: 13,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 8,
+                          opacity: 0.9
+                        }}
+                      >
+                        <span>✎</span>
+                        {showItemNotes ? "Hide Notes" : "Add Notes"}{" "}
+                        <span style={{ opacity: 0.7 }}>▾</span>
+                      </button>
+                    </div>
+
+                    {showItemNotes && (
                       <div
                         style={{
-                          fontSize: "0.75rem",
-                          color: "#9ca3af",
-                          textTransform: "uppercase",
-                          letterSpacing: "0.06em"
+                          marginTop: 12,
+                          display: "grid",
+                          gridTemplateColumns: "1fr 1fr",
+                          gap: 12
                         }}
                       >
-                        Review status
-                      </div>
-                      <select
-                        value={item.status}
-                        onChange={(e) => {
-                          const nextStatus = e.target
-                            .value as AnswerReviewStatus;
-                          const patch: Partial<ResultItem> = {
-                            status: nextStatus
-                          };
+                        <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <span style={{ color: "#94a3b8", fontSize: 12 }}>
+                            reviewed_by (optional)
+                          </span>
+                          <input
+                            value={item.reviewed_by ?? ""}
+                            onChange={(e) =>
+                              updateResult(item.questionId, {
+                                reviewed_by: e.target.value || undefined
+                              })
+                            }
+                            placeholder="e.g. JD"
+                            style={{
+                              borderRadius: 12,
+                              border: "1px solid rgba(148,163,184,0.20)",
+                              backgroundColor: "rgba(2,6,23,0.55)",
+                              color: "#e5e7eb",
+                              padding: "10px 12px",
+                              fontSize: 14,
+                              outline: "none"
+                            }}
+                          />
+                        </label>
 
-                          if (
-                            nextStatus === "approved" ||
-                            nextStatus === "edited" ||
-                            nextStatus === "flagged"
-                          ) {
-                            patch.reviewed_at = new Date().toISOString();
-                          } else {
-                            patch.reviewed_at = undefined;
-                          }
-
-                          updateResult(item.questionId, patch);
-                        }}
-                        style={{
-                          backgroundColor: "#0b1220",
-                          color: "#e5e7eb",
-                          border: "1px solid rgba(148, 163, 184, 0.6)",
-                          borderRadius: "0.5rem",
-                          padding: "0.25rem 0.5rem",
-                          fontSize: "0.85rem"
-                        }}
-                      >
-                        <option value="draft">draft</option>
-                        <option value="approved">approved</option>
-                        <option value="edited">edited</option>
-                        <option value="flagged">flagged</option>
-                      </select>
-                    </div>
-
-                    <div
-                      style={{
-                        fontSize: "0.9rem",
-                        fontWeight: 500,
-                        marginBottom: "0.3rem",
-                        color: "#e5e7eb"
-                      }}
-                    >
-                      Q: {item.questionText}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: "0.9rem",
-                        color: "#d1d5db",
-                        marginBottom: "0.5rem"
-                      }}
-                    >
-                      {item.answer}
-                    </div>
-
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "1fr 1fr",
-                        gap: "0.6rem",
-                        marginBottom: "0.6rem"
-                      }}
-                    >
-                      <label style={{ display: "flex", flexDirection: "column" }}>
-                        <span style={{ fontSize: "0.75rem", color: "#9ca3af" }}>
-                          reviewed_by (optional)
-                        </span>
-                        <input
-                          value={item.reviewed_by ?? ""}
-                          onChange={(e) =>
-                            updateResult(item.questionId, {
-                              reviewed_by: e.target.value || undefined
-                            })
-                          }
-                          placeholder="e.g. Alice"
-                          style={{
-                            marginTop: 4,
-                            backgroundColor: "#0b1220",
-                            color: "#e5e7eb",
-                            border: "1px solid rgba(148, 163, 184, 0.6)",
-                            borderRadius: "0.5rem",
-                            padding: "0.4rem 0.6rem",
-                            fontSize: "0.85rem"
-                          }}
-                        />
-                      </label>
-
-                      <div style={{ display: "flex", flexDirection: "column" }}>
-                        <span style={{ fontSize: "0.75rem", color: "#9ca3af" }}>
-                          reviewed_at (auto)
-                        </span>
-                        <div
-                          style={{
-                            marginTop: 4,
-                            backgroundColor: "#0b1220",
-                            border: "1px solid rgba(148, 163, 184, 0.25)",
-                            borderRadius: "0.5rem",
-                            padding: "0.4rem 0.6rem",
-                            fontSize: "0.85rem",
-                            color: item.reviewed_at ? "#e5e7eb" : "#9ca3af"
-                          }}
-                        >
-                          {item.reviewed_at
-                            ? new Date(item.reviewed_at).toLocaleString()
-                            : "—"}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <span style={{ color: "#94a3b8", fontSize: 12 }}>
+                            reviewed_at (auto)
+                          </span>
+                          <div
+                            style={{
+                              borderRadius: 12,
+                              border: "1px solid rgba(148,163,184,0.14)",
+                              backgroundColor: "rgba(2,6,23,0.35)",
+                              padding: "10px 12px",
+                              color: item.reviewed_at ? "#e5e7eb" : "#94a3b8",
+                              fontSize: 14
+                            }}
+                          >
+                            {item.reviewed_at
+                              ? new Date(item.reviewed_at).toLocaleString()
+                              : "—"}
+                          </div>
                         </div>
-                      </div>
-                    </div>
 
-                    <label style={{ display: "flex", flexDirection: "column" }}>
-                      <span style={{ fontSize: "0.75rem", color: "#9ca3af" }}>
-                        review_notes (optional)
-                      </span>
-                      <textarea
-                        value={item.review_notes ?? ""}
-                        onChange={(e) =>
-                          updateResult(item.questionId, {
-                            review_notes: e.target.value || undefined
-                          })
-                        }
-                        rows={2}
-                        placeholder="Notes for reviewers (e.g. missing evidence for retention window)."
-                        style={{
-                          marginTop: 4,
-                          backgroundColor: "#0b1220",
-                          color: "#e5e7eb",
-                          border: "1px solid rgba(148, 163, 184, 0.6)",
-                          borderRadius: "0.5rem",
-                          padding: "0.5rem 0.6rem",
-                          fontSize: "0.85rem",
-                          resize: "vertical"
-                        }}
-                      />
-                    </label>
-
-                    <div
-                      style={{
-                        fontSize: "0.8rem",
-                        color: "#9ca3af"
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontWeight: 500,
-                          textTransform: "uppercase",
-                          letterSpacing: "0.05em",
-                          fontSize: "0.75rem"
-                        }}
-                      >
-                        Citations
-                      </span>
-                      {item.citations.length === 0 ? (
-                        <div style={{ marginTop: "0.25rem" }}>
-                          No evidence available for this answer.
-                        </div>
-                      ) : (
-                        <ul
+                        <label
                           style={{
-                            listStyle: "none",
-                            padding: 0,
-                            margin: "0.25rem 0 0",
                             display: "flex",
                             flexDirection: "column",
-                            gap: "0.25rem"
+                            gap: 6,
+                            gridColumn: "1 / -1"
                           }}
                         >
-                          {item.citations.map((c, index) => (
-                            <li key={`${item.questionId}-cit-${index}`}>
-                              <span style={{ color: "#e5e7eb" }}>
-                                {c.document}
-                              </span>
-                              {" · "}
-                              <span>{c.section}</span>
-                              {" — "}
-                              <span style={{ fontStyle: "italic" }}>
-                                {c.snippet}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </section>
-
-        <aside
-          aria-label="Run history"
-          style={{
-            padding: "1rem 1.25rem",
-            borderRadius: "0.75rem",
-            backgroundColor: "#020617",
-            border: "1px solid rgba(148, 163, 184, 0.35)",
-            display: "flex",
-            flexDirection: "column"
-          }}
-        >
-          <h2
-            style={{
-              fontSize: "1rem",
-              fontWeight: 500,
-              marginBottom: "0.75rem"
-            }}
-          >
-            Run history
-          </h2>
-
-          {runs.length === 0 ? (
-            <p style={{ fontSize: "0.85rem", color: "#9ca3af" }}>
-              Runs from this browser session will appear here with status and
-              timestamps.
-            </p>
-          ) : (
-            <ul
-              style={{
-                listStyle: "none",
-                padding: 0,
-                margin: 0,
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.5rem",
-                overflowY: "auto"
-              }}
-            >
-              {runs.map((run) => {
-                const isActive = run.runId === activeRunId;
-                const statusLabel: Record<RunStatus, string> = {
-                  running: "Running",
-                  completed: "Completed",
-                  failed: "Failed"
-                };
-
-                const badgeColor =
-                  run.status === "completed"
-                    ? "#22c55e"
-                    : run.status === "failed"
-                    ? "#f97316"
-                    : "#38bdf8";
-
-                return (
-                  <li
-                    key={run.runId}
-                    style={{
-                      padding: "0.6rem 0.75rem",
-                      borderRadius: "0.6rem",
-                      border: isActive
-                        ? "1px solid rgba(96, 165, 250, 0.9)"
-                        : "1px solid rgba(148, 163, 184, 0.4)",
-                      backgroundColor: isActive
-                        ? "rgba(15, 23, 42, 0.95)"
-                        : "rgba(15, 23, 42, 0.7)",
-                      cursor: "default",
-                      fontSize: "0.8rem"
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        marginBottom: "0.25rem"
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontFamily: "ui-monospace, SFMono-Regular, Menlo",
-                          fontSize: "0.75rem",
-                          color: "#9ca3af"
-                        }}
-                      >
-                        {new Date(run.startedAt).toLocaleTimeString()}
-                      </span>
-                      <span
-                        style={{
-                          padding: "0.1rem 0.45rem",
-                          borderRadius: "999px",
-                          backgroundColor: badgeColor,
-                          color: "#020617",
-                          fontWeight: 600,
-                          fontSize: "0.75rem"
-                        }}
-                      >
-                        {statusLabel[run.status]}
-                      </span>
-                    </div>
-                    <div>
-                      {run.questionCount} question
-                      {run.questionCount === 1 ? "" : "s"}
-                    </div>
-                    {run.lastError && (
-                      <div
-                        style={{
-                          marginTop: "0.2rem",
-                          color: "#f97373"
-                        }}
-                      >
-                        {run.lastError}
+                          <span style={{ color: "#94a3b8", fontSize: 12 }}>
+                            review_notes (optional)
+                          </span>
+                          <textarea
+                            value={item.review_notes ?? ""}
+                            onChange={(e) =>
+                              updateResult(item.questionId, {
+                                review_notes: e.target.value || undefined
+                              })
+                            }
+                            rows={2}
+                            placeholder="Notes for reviewers (e.g. missing evidence for retention window)."
+                            style={{
+                              borderRadius: 12,
+                              border: "1px solid rgba(148,163,184,0.20)",
+                              backgroundColor: "rgba(2,6,23,0.55)",
+                              color: "#e5e7eb",
+                              padding: "10px 12px",
+                              fontSize: 14,
+                              outline: "none",
+                              resize: "vertical"
+                            }}
+                          />
+                        </label>
                       </div>
                     )}
-                  </li>
+
+                    <div style={{ marginTop: 16 }}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedEvidence((prev) => ({
+                            ...prev,
+                            [item.questionId]: !isExpanded
+                          }))
+                        }
+                        style={{
+                          background: "transparent",
+                          border: "none",
+                          cursor: "pointer",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 10,
+                          color: "#a78bfa",
+                          fontWeight: 800,
+                          letterSpacing: "0.06em",
+                          textTransform: "uppercase",
+                          fontSize: 12
+                        }}
+                      >
+                        ⛨ Evidence Sources <span style={{ color: "#94a3b8" }}>▾</span>
+                      </button>
+
+                      {isExpanded && (
+                        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+                          {(item.citations.length === 0
+                            ? [
+                                {
+                                  document: "No evidence",
+                                  section: "",
+                                  snippet: "No evidence available for this answer."
+                                }
+                              ]
+                            : item.citations
+                          ).map((c, i) => (
+                            <div
+                              key={`${item.questionId}-e-${i}`}
+                              style={{
+                                borderRadius: 14,
+                                border: "1px solid rgba(148,163,184,0.20)",
+                                backgroundColor: "rgba(2,6,23,0.55)",
+                                padding: 14
+                              }}
+                            >
+                              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                <span
+                                  style={{
+                                    padding: "4px 10px",
+                                    borderRadius: 999,
+                                    backgroundColor: "rgba(99,102,241,0.18)",
+                                    border: "1px solid rgba(99,102,241,0.22)",
+                                    color: "#c4b5fd",
+                                    fontSize: 12,
+                                    fontWeight: 750
+                                  }}
+                                >
+                                  {c.document}
+                                </span>
+                                <span style={{ color: "#94a3b8", fontSize: 13 }}>
+                                  {c.section ? `Section: ${c.section}` : ""}
+                                </span>
+                              </div>
+                              <div style={{ marginTop: 10, color: "#cbd5e1", fontStyle: "italic", lineHeight: 1.6 }}>
+                                “{c.snippet}”
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </section>
                 );
               })}
-            </ul>
-          )}
-        </aside>
-      </main>
+            </div>
+          </div>
+        </main>
+      )}
     </div>
   );
 };

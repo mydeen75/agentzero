@@ -18,13 +18,16 @@ The `Security Questionnaire Review` frontend implements the MVP1 single-flow UI 
     - Structure payload as `{ id: string; text: string }[]`.
 
 - **Run control**
-  - Primary action: `Start run` button.
+  - Primary action: `Generate Answers` button.
   - Preconditions:
     - At least one valid question.
     - No run currently `running` (FSM enforces this).
   - Side effects:
     - Transitions FSM from `idle` → `running`.
     - Calls `startRun` service with normalized question payload.
+
+- **Demo input seeding**
+  - UI provides a `Load Demo Questions` control that replaces the textarea content with a pre-seeded example of 3 security questions for the happy-path demo.
 
 - **Optional configuration (deferred / hidden in UI for MVP1)**
   - Backing fields (invisible in UI but modeled in types to align with SAD):
@@ -173,7 +176,7 @@ This checklist must be reviewed and updated after **each frontend commit** that 
 
 - **Results rendering matches spec**
   - **Status**: ✅
-  - **Note**: Results list now renders question, answer, citations, plus per-answer review controls (status selector + optional `review_notes`, `reviewed_by`, and auto `reviewed_at`).
+  - **Note**: Results UI now matches the EvidenceFlow-style demo: “Draft Complete” header, per-answer status actions (Approve/Edited/Flag/Draft), optional notes section, and expandable “Evidence Sources” cards.
 
 - **History behaves as described**
   - **Status**: ✅
