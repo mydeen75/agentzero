@@ -91,6 +91,10 @@ The `Security Questionnaire Review` frontend implements the MVP1 single-flow UI 
     - `questionText: string`
     - `answer: string`
     - `citations: { document: string; section: string; snippet: string }[]`
+    - `status: "draft" | "approved" | "edited" | "flagged"`
+    - `review_notes?: string`
+    - `reviewed_by?: string`
+    - `reviewed_at?: string`
   - The React app uses a shared TypeScript type for this structure to keep the UI in sync with backend contracts.
 
 - **Results UI**
@@ -101,6 +105,10 @@ The `Security Questionnaire Review` frontend implements the MVP1 single-flow UI 
       - Document name.
       - Section.
       - Short snippet.
+    - Review metadata per answer:
+      - Status selector: `draft | approved | edited | flagged`.
+      - Optional `review_notes` field.
+      - Optional `reviewed_by` field and auto-populated `reviewed_at` timestamp when status is set to `approved` / `edited` / `flagged`.
   - Behaviour:
     - Sorted by question input order.
     - If a question has no evidence, show an explicit “No evidence available” message to preserve UX trust.
@@ -108,10 +116,17 @@ The `Security Questionnaire Review` frontend implements the MVP1 single-flow UI 
 
 - **Export stub**
   - MVP1 for this task:
-    - Provide an `Export` button that calls a stub `exportResults(results)` function.
+    - Provide export controls:
+      - `Export JSON` — downloads the current results payload as JSON.
+      - `Export PDF` — generates a simple client-side PDF containing questions, answers, review metadata, and citations.
+    - Export gating:
+      - Export is **disabled** while any answer is `draft`.
+      - Export is **enabled** when **all answers** are `approved` or `edited`.
+      - Export can optionally be enabled when some answers are `flagged` **only if** user selects “Export with flagged items”.
+      - `draft` answers always block export.
     - For now, the stub may:
-      - Log the payload to the console, or
       - Trigger a simple client-side download of JSON (e.g. `results-[timestamp].json`).
+      - Generate a client-side PDF (MVP convenience) until backend `/api/export` is wired.
     - Aligns with `sad.mvp1.md`’s requirement for a single export action, while deferring full PDF/Word implementation to the backend epic.
 
 ---
@@ -154,11 +169,11 @@ This checklist must be reviewed and updated after **each frontend commit** that 
 
 - **Services match contracts**
   - **Status**: ✅
-  - **Note**: `startRun(questions: QuestionInput[])` returns `{ runId, results? }` aligned with the `Results` payload shape; `getRunStatus(runId)` returns `{ status, results?, error? }` as described, with current implementation stubbed on the frontend.
+  - **Note**: `startRun(questions: QuestionInput[])` returns `{ runId, results? }` aligned with the expanded `ResultItem` contract (including `status` and optional review fields); missing backend review fields default to `status: "draft"` on the frontend mapping.
 
 - **Results rendering matches spec**
   - **Status**: ✅
-  - **Note**: Results list renders question text, mock draft answer, and citations `{ document, section, snippet }[]` per item; “No evidence available” message shows when citations are empty.
+  - **Note**: Results list now renders question, answer, citations, plus per-answer review controls (status selector + optional `review_notes`, `reviewed_by`, and auto `reviewed_at`).
 
 - **History behaves as described**
   - **Status**: ✅
@@ -166,7 +181,7 @@ This checklist must be reviewed and updated after **each frontend commit** that 
 
 - **Export behaviour is aligned**
   - **Status**: ✅
-  - **Note**: `Export JSON` button triggers a client-side download of the current `{ results: ResultItem[] }` payload, matching the described stub export behavior.
+  - **Note**: Export JSON and Export PDF are both gated: disabled while any answer is `draft`; enabled when all are `approved`/`edited`, or when “Export with flagged items” is selected and remaining answers are `flagged`.
 
 - **Crew status banner is in sync**
   - **Status**: ✅

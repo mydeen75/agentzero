@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from "react";
+import { jsPDF } from "jspdf";
 import { transition, type UiState } from "./fsm";
 import {
+  type AnswerReviewStatus,
   type QuestionInput,
   type ResultItem,
   type RunSummary,
@@ -34,6 +36,7 @@ export const App: React.FC = () => {
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [exportWithFlagged, setExportWithFlagged] = useState(false);
 
   const questionCount = useMemo(() => countQuestions(rawInput), [rawInput]);
   const hasTooManyQuestions = questionCount > MAX_QUESTIONS;
@@ -68,6 +71,7 @@ export const App: React.FC = () => {
       setRuns((prev) => [summary, ...prev]);
       setActiveRunId(runId);
       setResults(runResults ?? null);
+      setExportWithFlagged(false);
       setUiState((prev) => transition(prev, { type: "RESOLVE" }));
       setLastUpdated(new Date().toISOString());
     } catch (e) {
@@ -96,10 +100,55 @@ export const App: React.FC = () => {
     setActiveRunId(null);
     setError(null);
     setLastUpdated(new Date().toISOString());
+    setExportWithFlagged(false);
   }
 
+  function updateResult(
+    questionId: string,
+    patch: Partial<
+      Pick<
+        ResultItem,
+        "status" | "review_notes" | "reviewed_by" | "reviewed_at"
+      >
+    >
+  ) {
+    setResults((prev) => {
+      if (!prev) return prev;
+      return prev.map((r) =>
+        r.questionId === questionId
+          ? {
+              ...r,
+              ...patch
+            }
+          : r
+      );
+    });
+    setLastUpdated(new Date().toISOString());
+  }
+
+  const canExport = useMemo(() => {
+    if (!results || results.length === 0) return false;
+
+    const allNonDraft = results.every((r) => r.status !== "draft");
+    if (!allNonDraft) return false;
+
+    const allApprovedOrEdited = results.every(
+      (r) => r.status === "approved" || r.status === "edited"
+    );
+    if (allApprovedOrEdited) return true;
+
+    if (!exportWithFlagged) return false;
+
+    return results.every(
+      (r) =>
+        r.status === "approved" ||
+        r.status === "edited" ||
+        r.status === "flagged"
+    );
+  }, [results, exportWithFlagged]);
+
   function handleExport() {
-    if (!results || results.length === 0) return;
+    if (!canExport || !results || results.length === 0) return;
 
     const blob = new Blob([JSON.stringify({ results }, null, 2)], {
       type: "application/json"
@@ -112,6 +161,114 @@ export const App: React.FC = () => {
       .replace(/[:.]/g, "-")}.json`;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  function handleExportPdf() {
+    if (!canExport || !results || results.length === 0) return;
+
+    const doc = new jsPDF({
+      unit: "pt",
+      format: "letter"
+    });
+
+    const left = 48;
+    const rightMargin = 48;
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const maxWidth = pageWidth - left - rightMargin;
+
+    let y = 56;
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(16);
+    doc.text("Security Questionnaire Review (MVP1)", left, y);
+    y += 18;
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    doc.text(`Generated: ${new Date().toLocaleString()}`, left, y);
+    y += 18;
+
+    results.forEach((r, idx) => {
+      const ensureSpace = (needed: number) => {
+        const pageHeight = doc.internal.pageSize.getHeight();
+        if (y + needed > pageHeight - 56) {
+          doc.addPage();
+          y = 56;
+        }
+      };
+
+      ensureSpace(60);
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(12);
+      doc.text(`Q${idx + 1}:`, left, y);
+      const qLines = doc.splitTextToSize(r.questionText, maxWidth - 28);
+      doc.text(qLines, left + 28, y);
+      y += 16 + qLines.length * 12;
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(11);
+      doc.text("Answer:", left, y);
+      const aLines = doc.splitTextToSize(r.answer, maxWidth);
+      doc.text(aLines, left, y + 14);
+      y += 18 + aLines.length * 12;
+
+      doc.setFontSize(10);
+      doc.text(`Status: ${r.status}`, left, y);
+      y += 14;
+
+      if (r.reviewed_by) {
+        doc.text(`Reviewed by: ${r.reviewed_by}`, left, y);
+        y += 14;
+      }
+      if (r.reviewed_at) {
+        doc.text(
+          `Reviewed at: ${new Date(r.reviewed_at).toLocaleString()}`,
+          left,
+          y
+        );
+        y += 14;
+      }
+      if (r.review_notes) {
+        const noteLines = doc.splitTextToSize(
+          `Notes: ${r.review_notes}`,
+          maxWidth
+        );
+        doc.text(noteLines, left, y);
+        y += noteLines.length * 12 + 4;
+      }
+
+      doc.setFont("helvetica", "bold");
+      doc.text("Citations:", left, y);
+      y += 14;
+      doc.setFont("helvetica", "normal");
+
+      if (r.citations.length === 0) {
+        doc.text("No evidence available.", left, y);
+        y += 14;
+      } else {
+        r.citations.forEach((c) => {
+          const citationText = `${c.document} · ${c.section} — ${c.snippet}`;
+          const cLines = doc.splitTextToSize(`- ${citationText}`, maxWidth);
+          ensureSpace(14 + cLines.length * 12);
+          doc.text(cLines, left, y);
+          y += cLines.length * 12 + 2;
+        });
+      }
+
+      y += 10;
+      ensureSpace(10);
+      doc.setDrawColor(148, 163, 184);
+      doc.setLineWidth(0.5);
+      doc.line(left, y, pageWidth - rightMargin, y);
+      y += 14;
+    });
+
+    doc.save(
+      `security-questionnaire-results-${new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")}.pdf`
+    );
   }
 
   const disableInput = uiState === "running";
@@ -138,6 +295,24 @@ export const App: React.FC = () => {
   if (uiState === "running") {
     progressLabel = "Processing: Parsing → Finding evidence → Drafting → Attaching citations…";
   }
+
+  const exportHelperText = useMemo(() => {
+    if (!results || results.length === 0) return null;
+    if (canExport) {
+      return exportWithFlagged
+        ? "Export enabled (including flagged items)."
+        : "Export enabled (all answers approved/edited).";
+    }
+
+    const hasDraft = results.some((r) => r.status === "draft");
+    if (hasDraft) return "Export disabled: all answers must be reviewed (no drafts).";
+
+    if (!exportWithFlagged) {
+      return "Export disabled: approve/edit all answers, or choose “Export with flagged items”.";
+    }
+
+    return "Export disabled: answers must be approved/edited/flagged.";
+  }, [results, canExport, exportWithFlagged]);
 
   return (
     <div
@@ -327,24 +502,85 @@ export const App: React.FC = () => {
             )}
 
             {results && results.length > 0 && (
-              <button
-                type="button"
-                onClick={handleExport}
+              <div
                 style={{
                   marginLeft: "auto",
-                  padding: "0.5rem 1.1rem",
-                  borderRadius: "999px",
-                  border: "1px solid rgba(148, 163, 184, 0.6)",
-                  backgroundColor: "#020617",
-                  color: "#e5e7eb",
-                  cursor: "pointer",
-                  fontSize: "0.9rem"
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.75rem"
                 }}
               >
-                Export JSON
-              </button>
+                <label
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.45rem",
+                    fontSize: "0.85rem",
+                    color: "#9ca3af",
+                    userSelect: "none"
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={exportWithFlagged}
+                    onChange={(e) => setExportWithFlagged(e.target.checked)}
+                    style={{ accentColor: "#38bdf8" }}
+                  />
+                  Export with flagged items
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleExport}
+                  disabled={!canExport}
+                  style={{
+                    padding: "0.5rem 1.1rem",
+                    borderRadius: "999px",
+                    border: "1px solid rgba(148, 163, 184, 0.6)",
+                    backgroundColor: canExport
+                      ? "#020617"
+                      : "rgba(55, 65, 81, 0.9)",
+                    color: "#e5e7eb",
+                    cursor: canExport ? "pointer" : "not-allowed",
+                    fontSize: "0.9rem"
+                  }}
+                >
+                  Export JSON
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleExportPdf}
+                  disabled={!canExport}
+                  style={{
+                    padding: "0.5rem 1.1rem",
+                    borderRadius: "999px",
+                    border: "1px solid rgba(148, 163, 184, 0.6)",
+                    backgroundColor: canExport
+                      ? "rgba(168, 85, 247, 0.18)"
+                      : "rgba(55, 65, 81, 0.9)",
+                    color: "#e5e7eb",
+                    cursor: canExport ? "pointer" : "not-allowed",
+                    fontSize: "0.9rem"
+                  }}
+                >
+                  Export PDF
+                </button>
+              </div>
             )}
           </div>
+
+          {exportHelperText && (
+            <div
+              style={{
+                marginTop: "0.35rem",
+                fontSize: "0.8rem",
+                color: canExport ? "#86efac" : "#9ca3af"
+              }}
+            >
+              {exportHelperText}
+            </div>
+          )}
 
           {progressLabel && (
             <div
@@ -423,6 +659,62 @@ export const App: React.FC = () => {
                   >
                     <div
                       style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "0.75rem",
+                        marginBottom: "0.35rem"
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: "0.75rem",
+                          color: "#9ca3af",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.06em"
+                        }}
+                      >
+                        Review status
+                      </div>
+                      <select
+                        value={item.status}
+                        onChange={(e) => {
+                          const nextStatus = e.target
+                            .value as AnswerReviewStatus;
+                          const patch: Partial<ResultItem> = {
+                            status: nextStatus
+                          };
+
+                          if (
+                            nextStatus === "approved" ||
+                            nextStatus === "edited" ||
+                            nextStatus === "flagged"
+                          ) {
+                            patch.reviewed_at = new Date().toISOString();
+                          } else {
+                            patch.reviewed_at = undefined;
+                          }
+
+                          updateResult(item.questionId, patch);
+                        }}
+                        style={{
+                          backgroundColor: "#0b1220",
+                          color: "#e5e7eb",
+                          border: "1px solid rgba(148, 163, 184, 0.6)",
+                          borderRadius: "0.5rem",
+                          padding: "0.25rem 0.5rem",
+                          fontSize: "0.85rem"
+                        }}
+                      >
+                        <option value="draft">draft</option>
+                        <option value="approved">approved</option>
+                        <option value="edited">edited</option>
+                        <option value="flagged">flagged</option>
+                      </select>
+                    </div>
+
+                    <div
+                      style={{
                         fontSize: "0.9rem",
                         fontWeight: 500,
                         marginBottom: "0.3rem",
@@ -440,6 +732,87 @@ export const App: React.FC = () => {
                     >
                       {item.answer}
                     </div>
+
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "1fr 1fr",
+                        gap: "0.6rem",
+                        marginBottom: "0.6rem"
+                      }}
+                    >
+                      <label style={{ display: "flex", flexDirection: "column" }}>
+                        <span style={{ fontSize: "0.75rem", color: "#9ca3af" }}>
+                          reviewed_by (optional)
+                        </span>
+                        <input
+                          value={item.reviewed_by ?? ""}
+                          onChange={(e) =>
+                            updateResult(item.questionId, {
+                              reviewed_by: e.target.value || undefined
+                            })
+                          }
+                          placeholder="e.g. Alice"
+                          style={{
+                            marginTop: 4,
+                            backgroundColor: "#0b1220",
+                            color: "#e5e7eb",
+                            border: "1px solid rgba(148, 163, 184, 0.6)",
+                            borderRadius: "0.5rem",
+                            padding: "0.4rem 0.6rem",
+                            fontSize: "0.85rem"
+                          }}
+                        />
+                      </label>
+
+                      <div style={{ display: "flex", flexDirection: "column" }}>
+                        <span style={{ fontSize: "0.75rem", color: "#9ca3af" }}>
+                          reviewed_at (auto)
+                        </span>
+                        <div
+                          style={{
+                            marginTop: 4,
+                            backgroundColor: "#0b1220",
+                            border: "1px solid rgba(148, 163, 184, 0.25)",
+                            borderRadius: "0.5rem",
+                            padding: "0.4rem 0.6rem",
+                            fontSize: "0.85rem",
+                            color: item.reviewed_at ? "#e5e7eb" : "#9ca3af"
+                          }}
+                        >
+                          {item.reviewed_at
+                            ? new Date(item.reviewed_at).toLocaleString()
+                            : "—"}
+                        </div>
+                      </div>
+                    </div>
+
+                    <label style={{ display: "flex", flexDirection: "column" }}>
+                      <span style={{ fontSize: "0.75rem", color: "#9ca3af" }}>
+                        review_notes (optional)
+                      </span>
+                      <textarea
+                        value={item.review_notes ?? ""}
+                        onChange={(e) =>
+                          updateResult(item.questionId, {
+                            review_notes: e.target.value || undefined
+                          })
+                        }
+                        rows={2}
+                        placeholder="Notes for reviewers (e.g. missing evidence for retention window)."
+                        style={{
+                          marginTop: 4,
+                          backgroundColor: "#0b1220",
+                          color: "#e5e7eb",
+                          border: "1px solid rgba(148, 163, 184, 0.6)",
+                          borderRadius: "0.5rem",
+                          padding: "0.5rem 0.6rem",
+                          fontSize: "0.85rem",
+                          resize: "vertical"
+                        }}
+                      />
+                    </label>
+
                     <div
                       style={{
                         fontSize: "0.8rem",
