@@ -16,10 +16,23 @@ export type GetRunStatusResponse = {
   error?: string;
 };
 
-const API_BASE_URL =
-  (import.meta as any).env?.VITE_BACKEND_URL ?? "http://localhost:8000";
+// Prefer relative /api calls (works with Vite proxy in dev, same-origin in prod).
+// Override with VITE_BACKEND_URL when deploying backend separately.
+const API_BASE_URL = ((import.meta as any).env?.VITE_BACKEND_URL ?? "") as string;
+
+function apiUrl(path: string): string {
+  const base = (API_BASE_URL || "").trim().replace(/\/+$/, "");
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return base ? `${base}${p}` : p;
+}
 
 const START_RUN_TIMEOUT_MS = 15000;
+
+export type RAGBuildResponse = {
+  built_from: string;
+  documents_indexed: number;
+  chunks_indexed: number;
+};
 
 type BackendRunResultItem = {
   question_id: string;
@@ -52,7 +65,7 @@ export async function startRun(
   );
 
   try {
-    const response = await fetch(`${API_BASE_URL}/api/run`, {
+    const response = await fetch(apiUrl("/api/run"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -120,6 +133,47 @@ export async function startRun(
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+export async function buildRagIndex(params?: {
+  path?: string;
+  max_files?: number;
+  chunk_size?: number;
+  chunk_overlap?: number;
+}): Promise<RAGBuildResponse> {
+  let response: Response;
+  try {
+    response = await fetch(apiUrl("/api/rag/build"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        path: params?.path ?? null,
+        max_files: params?.max_files ?? null,
+        chunk_size: params?.chunk_size ?? 1200,
+        chunk_overlap: params?.chunk_overlap ?? 150
+      })
+    });
+  } catch (err) {
+    // Browser-level network error (backend down, wrong URL, blocked, etc.)
+    const target = apiUrl("/api/rag/build");
+    const hint = API_BASE_URL
+      ? `Check VITE_BACKEND_URL=${API_BASE_URL}`
+      : "Start the backend on http://127.0.0.1:8000 (or set VITE_BACKEND_URL).";
+    throw new Error(
+      `Failed to reach backend at ${target}. ${hint}`
+    );
+  }
+
+  if (!response.ok) {
+    const message = await safeReadErrorMessage(response);
+    throw new Error(
+      message ?? `Failed to build RAG index (status ${response.status}).`
+    );
+  }
+
+  return (await response.json()) as RAGBuildResponse;
 }
 
 async function safeReadErrorMessage(

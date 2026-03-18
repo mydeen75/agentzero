@@ -2,15 +2,46 @@ import React, { useMemo, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
 import { transition, type UiState } from "./fsm";
 import type { AnswerReviewStatus, QuestionInput, ResultItem } from "./types";
-import { startRun } from "./services";
+import { buildRagIndex, startRun, type RAGBuildResponse } from "./services";
 
 const MAX_QUESTIONS = 5;
 
-const DEMO_QUESTIONS = [
-  "Does your organization have a formal access control policy? How do you manage user access provisioning and deprovisioning?",
-  "How does your organization protect data at rest and in transit? Please describe your encryption standards.",
-  "Describe your incident response process. How quickly can your team detect, respond to, and recover from a security incident?"
-].join("\n\n");
+const DEMO_QUESTION_POOL: string[] = [
+  // Questions that should find citations from the demo docs
+  "What is the company’s policy on least privilege and role-based access control?",
+  "Is multi-factor authentication required for privileged access and remote access?",
+  "How often are user access reviews performed for production systems?",
+  "What approvals are required before granting access to production or sensitive systems?",
+  "How quickly must standard user access be disabled after employee termination?",
+  "How quickly must privileged access be revoked after termination?",
+  "Are shared accounts allowed under the access control standard?",
+  "What evidence is required before onboarding a high-risk vendor?",
+  "How often are high-risk vendors reassessed?",
+  "What information must be documented for a security policy exception?",
+  "What triggers a formal risk assessment?",
+  "When is a post-incident review required, and how soon must it be completed?",
+
+  // Questions that should NOT find answers from the demo docs
+  "What is the company’s encryption key rotation schedule for databases and backups?",
+  "What is the backup retention period for production systems and how often are restore tests performed?",
+  "What secure software development lifecycle controls are required for code review, SAST, and dependency scanning?"
+];
+
+function pickRandomUnique<T>(items: T[], n: number): T[] {
+  const copy = items.slice();
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy.slice(0, Math.min(n, copy.length));
+}
+
+function buildDemoQuestionsText(): string {
+  return pickRandomUnique(DEMO_QUESTION_POOL, 3).join("\n\n");
+}
+
+const DEMO_PLACEHOLDER =
+  "Click “Load Demo Questions” to insert a seeded 3-question demo set.";
 
 function normalizeQuestions(raw: string): QuestionInput[] {
   const lines = raw
@@ -57,6 +88,19 @@ function statusTextColor(status: AnswerReviewStatus): string {
   }
 }
 
+function formatBuiltFrom(input: string): string {
+  const normalized = input.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  const idx = parts.findIndex((p) => p.toLowerCase() === "agent0");
+  if (idx >= 0) {
+    // Show the *last* folder name under Agent0
+    // e.g. .../Agent0/project-context/2.build -> "2.build"
+    return parts[parts.length - 1] ?? input;
+  }
+  // Fallback: last path segment
+  return parts[parts.length - 1] ?? input;
+}
+
 type AgentStep = {
   key: "ingestion" | "retrieval" | "drafting" | "citation";
   label: string;
@@ -75,6 +119,14 @@ export const App: React.FC = () => {
   const [rawInput, setRawInput] = useState("");
   const [results, setResults] = useState<ResultItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const [activePage, setActivePage] = useState<
+    "dashboard" | "knowledgeBase" | "settings"
+  >("dashboard");
+  const [ragBuild, setRagBuild] = useState<RAGBuildResponse | null>(null);
+  const [ragBuilding, setRagBuilding] = useState(false);
+  const [ragError, setRagError] = useState<string | null>(null);
+  const [ragLastBuiltAt, setRagLastBuiltAt] = useState<string | null>(null);
 
   const [exportWithFlagged, setExportWithFlagged] = useState(false);
   const [expandedEvidence, setExpandedEvidence] = useState<Record<string, boolean>>({});
@@ -124,6 +176,22 @@ export const App: React.FC = () => {
         r.status === "flagged"
     );
   }, [results, exportWithFlagged]);
+
+  async function handleBuildRag() {
+    setRagBuilding(true);
+    setRagError(null);
+    try {
+      const stats = await buildRagIndex();
+      setRagBuild(stats);
+      setRagLastBuiltAt(new Date().toISOString());
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : "Failed to build knowledge base index.";
+      setRagError(message);
+    } finally {
+      setRagBuilding(false);
+    }
+  }
 
   const reviewProgress = useMemo(() => {
     const counts: Record<AnswerReviewStatus, number> = {
@@ -399,9 +467,56 @@ export const App: React.FC = () => {
         </div>
 
         <div style={{ display: "flex", gap: 18, color: "#cbd5e1", fontSize: 14 }}>
-          <span style={{ opacity: 0.9 }}>Dashboard</span>
-          <span style={{ opacity: 0.9 }}>Knowledge Base</span>
-          <span style={{ opacity: 0.9 }}>Settings</span>
+          <button
+            type="button"
+            onClick={() => setActivePage("dashboard")}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: activePage === "dashboard" ? "#e2e8f0" : "#cbd5e1",
+              opacity: 0.95,
+              cursor: "pointer",
+              padding: 0,
+              fontSize: 14,
+              fontWeight: activePage === "dashboard" ? 700 : 500
+            }}
+          >
+            Dashboard
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              setActivePage("knowledgeBase");
+            }}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: activePage === "knowledgeBase" ? "#e2e8f0" : "#cbd5e1",
+              opacity: 0.95,
+              cursor: "pointer",
+              padding: 0,
+              fontSize: 14,
+              fontWeight: activePage === "knowledgeBase" ? 700 : 500
+            }}
+          >
+            Knowledge Base
+          </button>
+          <button
+            type="button"
+            onClick={() => setActivePage("settings")}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: activePage === "settings" ? "#e2e8f0" : "#cbd5e1",
+              opacity: 0.95,
+              cursor: "pointer",
+              padding: 0,
+              fontSize: 14,
+              fontWeight: activePage === "settings" ? 700 : 500
+            }}
+          >
+            Settings
+          </button>
         </div>
 
         <div
@@ -422,7 +537,187 @@ export const App: React.FC = () => {
         </div>
       </nav>
 
-      {viewMode === "input" && (
+      {activePage === "knowledgeBase" && (
+        <main style={{ padding: "54px 18px 84px" }}>
+          <div style={{ maxWidth: 980, margin: "0 auto" }}>
+            <div style={{ marginBottom: 18 }}>
+              <div
+                style={{
+                  fontSize: 34,
+                  fontWeight: 750,
+                  letterSpacing: "-0.02em"
+                }}
+              >
+                Knowledge Base
+              </div>
+              <div style={{ marginTop: 8, color: "#94a3b8", fontSize: 16 }}>
+                Build or refresh the demo RAG index used by the Retrieval Agent.
+              </div>
+            </div>
+
+            <section
+              style={{
+                ...glass,
+                borderRadius: 18,
+                padding: 18
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  flexWrap: "wrap",
+                  marginBottom: 12
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div
+                    style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: 999,
+                      backgroundColor: ragError
+                        ? "#f97373"
+                        : ragBuilding
+                        ? "#38bdf8"
+                        : ragBuild
+                        ? "#22c55e"
+                        : "#9ca3af",
+                      boxShadow: ragError
+                        ? "0 0 12px rgba(248,113,113,0.35)"
+                        : ragBuilding
+                        ? "0 0 12px rgba(56,189,248,0.25)"
+                        : ragBuild
+                        ? "0 0 12px rgba(34,197,94,0.22)"
+                        : "none"
+                    }}
+                    aria-hidden
+                  />
+                  <div style={{ fontSize: 13, color: "#cbd5e1" }}>
+                    Status:{" "}
+                    <span style={{ fontWeight: 800 }}>
+                      {ragError
+                        ? "error"
+                        : ragBuilding
+                        ? "building"
+                        : ragBuild
+                        ? "built"
+                        : "not built"}
+                    </span>
+                  </div>
+                </div>
+
+                <div style={{ fontSize: 13, color: "#94a3b8" }}>
+                  Last built:{" "}
+                  <span style={{ color: "#cbd5e1", fontWeight: 700 }}>
+                    {ragLastBuiltAt
+                      ? new Date(ragLastBuiltAt).toLocaleString()
+                      : "—"}
+                  </span>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  gap: 12,
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  flexWrap: "wrap"
+                }}
+              >
+                <div>
+                  <div style={{ fontWeight: 700 }}>RAG index</div>
+                  <div style={{ marginTop: 4, color: "#94a3b8", fontSize: 13 }}>
+                    Endpoint: <span style={{ color: "#cbd5e1" }}>/api/rag/build</span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleBuildRag}
+                  disabled={ragBuilding}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(148,163,184,0.22)",
+                    background: ragBuilding
+                      ? "rgba(148,163,184,0.12)"
+                      : "linear-gradient(135deg, rgba(34,197,94,0.95), rgba(16,185,129,0.95))",
+                    color: ragBuilding ? "#cbd5e1" : "#04110a",
+                    fontWeight: 800,
+                    cursor: ragBuilding ? "not-allowed" : "pointer"
+                  }}
+                >
+                  {ragBuilding ? "Building…" : "Build / Refresh index"}
+                </button>
+              </div>
+
+              {ragError && (
+                <div
+                  role="alert"
+                  style={{
+                    marginTop: 14,
+                    padding: "12px 12px",
+                    borderRadius: 12,
+                    backgroundColor: "rgba(127, 29, 29, 0.75)",
+                    border: "1px solid rgba(248, 113, 113, 0.35)",
+                    color: "#fee2e2",
+                    fontSize: 13
+                  }}
+                >
+                  {ragError}
+                </div>
+              )}
+
+              <div
+                style={{
+                  marginTop: 14,
+                  display: "grid",
+                  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                  gap: 12
+                }}
+              >
+                <div style={{ ...glass, borderRadius: 14, padding: 14 }}>
+                  <div style={{ color: "#94a3b8", fontSize: 12 }}>Built from</div>
+                  <div style={{ marginTop: 6, fontWeight: 700, fontSize: 13, color: "#e2e8f0" }}>
+                    {ragBuild?.built_from ? formatBuiltFrom(ragBuild.built_from) : "—"}
+                  </div>
+                </div>
+                <div style={{ ...glass, borderRadius: 14, padding: 14 }}>
+                  <div style={{ color: "#94a3b8", fontSize: 12 }}>Documents indexed</div>
+                  <div style={{ marginTop: 6, fontWeight: 800, fontSize: 20 }}>
+                    {ragBuild?.documents_indexed ?? "—"}
+                  </div>
+                </div>
+                <div style={{ ...glass, borderRadius: 14, padding: 14 }}>
+                  <div style={{ color: "#94a3b8", fontSize: 12 }}>Chunks indexed</div>
+                  <div style={{ marginTop: 6, fontWeight: 800, fontSize: 20 }}>
+                    {ragBuild?.chunks_indexed ?? "—"}
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </main>
+      )}
+
+      {activePage === "settings" && (
+        <main style={{ padding: "54px 18px 84px" }}>
+          <div style={{ maxWidth: 980, margin: "0 auto" }}>
+            <div style={{ fontSize: 34, fontWeight: 750, letterSpacing: "-0.02em" }}>
+              Settings
+            </div>
+            <div style={{ marginTop: 10, color: "#94a3b8" }}>
+              MVP placeholder.
+            </div>
+          </div>
+        </main>
+      )}
+
+      {activePage === "dashboard" && viewMode === "input" && (
         <main style={{ padding: "54px 18px 84px" }}>
           <div style={{ maxWidth: 980, margin: "0 auto" }}>
             <div style={{ textAlign: "center", marginBottom: 28 }}>
@@ -475,7 +770,7 @@ export const App: React.FC = () => {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setRawInput(DEMO_QUESTIONS)}
+                  onClick={() => setRawInput(buildDemoQuestionsText())}
                   style={{
                     background: "transparent",
                     border: "none",
@@ -493,7 +788,7 @@ export const App: React.FC = () => {
                 value={rawInput}
                 onChange={(e) => setRawInput(e.target.value)}
                 rows={8}
-                placeholder={DEMO_QUESTIONS}
+                placeholder={DEMO_PLACEHOLDER}
                 style={{
                   width: "100%",
                   boxSizing: "border-box",
@@ -574,7 +869,7 @@ export const App: React.FC = () => {
         </main>
       )}
 
-      {viewMode === "running" && (
+      {activePage === "dashboard" && viewMode === "running" && (
         <main style={{ padding: "56px 18px 84px" }}>
           <div
             style={{
@@ -678,7 +973,7 @@ export const App: React.FC = () => {
         </main>
       )}
 
-      {viewMode === "results" && (
+      {activePage === "dashboard" && viewMode === "results" && (
         <main style={{ padding: "44px 18px 84px" }}>
           <div style={{ maxWidth: 1100, margin: "0 auto" }}>
             <header
