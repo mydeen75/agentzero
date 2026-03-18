@@ -4,6 +4,7 @@ from typing import List, Dict
 from dotenv import load_dotenv
 
 from backend.runtime.crew_runner import kickoff_mvp1_pipeline
+from backend.runtime.staged_pipeline import run_mvp1_staged
 
 
 def main() -> None:
@@ -30,7 +31,9 @@ def main() -> None:
         {"id": "q2", "text": "How is customer data encrypted at rest?"},
     ]
 
-    result = kickoff_mvp1_pipeline(questions)
+    # Prefer staged pipeline for per-stage timing and progress behavior.
+    result, timings = run_mvp1_staged(questions)
+    print("Stage timings (ms):", timings)
     print(result)
 
 
