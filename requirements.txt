@@ -3,6 +3,10 @@ openai
 pyyaml
 fastapi
 uvicorn[standard]
+numpy
+scikit-learn
+python-docx
+pypdf
 
 # RAG (in-memory) dependencies
 scikit-learn
