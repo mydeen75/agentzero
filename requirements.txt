@@ -1,4 +1,14 @@
 crewai
 openai
 pyyaml
+fastapi
+uvicorn[standard]
+
+# RAG (in-memory) dependencies
+scikit-learn
+numpy
+python-docx
+pypdf
+python-dotenv
+openpyxl
 
