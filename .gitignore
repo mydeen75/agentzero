@@ -21,3 +21,6 @@ Thumbs.db
 *.pyc
 __pycache__/
 
+# Document Vault archives
+Document Vault/**/*.zip
+
